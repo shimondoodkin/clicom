@@ -70,6 +70,13 @@ enum Cmd {
     },
     /// Start a stdio MCP server exposing clicom's driver ops as tools.
     Mcp,
+    /// Spawn a command as a detached process. Prints the new pid.
+    /// Useful for launching wrappers from scripts/MCP without occupying the caller's terminal.
+    ExecDetached {
+        /// The command to spawn, after `--`.
+        #[arg(last = true, required = true, num_args = 1..)]
+        cmd: Vec<String>,
+    },
 }
 
 fn read_script_source(arg: Option<&str>, file: Option<&str>) -> anyhow::Result<String> {
@@ -126,6 +133,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::WaitIdle { partial, ms, timeout } =>
             clicom::clicom_cli::quickops::wait_idle(&cwd, partial.as_deref(), ms, timeout)?,
         Cmd::Mcp => clicom::clicom_cli::cmd_mcp::run(&cwd)?,
+        Cmd::ExecDetached { cmd } => clicom::clicom_cli::cmd_exec_detached::run(cmd)?,
     };
     std::process::exit(code);
 }

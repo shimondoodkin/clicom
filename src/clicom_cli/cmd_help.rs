@@ -39,6 +39,7 @@ SUBCOMMANDS:
     queue    Drop a Rhai script and exit immediately (asynchronous)
     clean    Delete result triples (.out / .err / .done) from an instance's commands/
     mcp      Start a stdio MCP server (use from Claude Code / other MCP clients)
+    exec-detached  Spawn a command in a new console window (Windows) and exit
     help     Show this help, or `clicom help <topic>` for details
 
 QUICK COMMANDS (no Rhai escaping required):
@@ -53,7 +54,7 @@ TOPICS:
     host-fns   Reference of all Rhai host functions (§4)
     script     Pointers to Rhai language docs and a one-page tutorial
     layout     The .clicom/ on-disk layout (§3)
-    start | status | run | queue | clean | mcp
+    start | status | run | queue | clean | mcp | exec-detached
         Long-form help for that subcommand
     type | keys | screen | screen-after | screen-after-re | wait-idle
         Long-form help for quick commands
@@ -77,6 +78,7 @@ pub fn run(topic: Option<&str>) -> i32 {
         Some("screen-after-re") => screen_after_re_help(),
         Some("wait-idle")      => wait_idle_help(),
         Some("mcp")            => mcp_help(),
+        Some("exec-detached")  => exec_detached_help(),
         Some(other) => {
             eprintln!("clicom help: unknown topic '{other}'");
             return 2;
@@ -216,6 +218,26 @@ fn wait_idle_help() -> String {
      \n\
      EXAMPLE:\n\
        clicom wait-idle 1000 --timeout 30000   # wait up to 30s for 1s of silence\n".into()
+}
+
+fn exec_detached_help() -> String {
+    "clicom exec-detached -- <command> [args...]\n\
+     \n\
+     Spawn <command> as a detached process and print its pid. Useful for launching\n\
+     wrapped agents from scripts or MCP tools without occupying the caller's terminal.\n\
+     \n\
+     Platform behavior:\n\
+       Windows: child gets a NEW CONSOLE WINDOW (CREATE_NEW_CONSOLE) — visible on\n\
+                the desktop, with its own stdin/stdout. Perfect for launching\n\
+                `clicom start -- claude` in a fresh terminal you can also see.\n\
+       Unix:    child is spawned with the launcher's stdio inherited; the launcher\n\
+                exits immediately, so the child becomes orphaned (reparented to init).\n\
+                For a fresh terminal window, wrap with your terminal emulator:\n\
+                    gnome-terminal -- clicom start -- claude\n\
+     \n\
+     EXAMPLES:\n\
+       clicom exec-detached -- clicom start -- claude\n\
+       clicom exec-detached -- cmd /C \"my-batch-script.cmd\"\n".into()
 }
 
 fn mcp_help() -> String {

@@ -8,3 +8,4 @@ pub mod cmd_run;
 pub mod cmd_clean;
 pub mod quickops;
 pub mod cmd_mcp;
+pub mod cmd_exec_detached;

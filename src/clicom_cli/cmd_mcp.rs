@@ -214,6 +214,21 @@ fn tool_definitions() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "name": "clicom_exec_detached",
+            "description": "Spawn a command as a detached process. On Windows the child gets its own console window (CREATE_NEW_CONSOLE). On Unix the child inherits stdio. Returns the spawned pid. Useful for launching wrapped agents in a fresh terminal.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cmd": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Argv for the command, e.g. [\"clicom\", \"start\", \"--\", \"claude\"]"
+                    }
+                },
+                "required": ["cmd"]
+            }
+        }),
     ]
 }
 
@@ -448,6 +463,22 @@ fn tool_call(
                 .map_err(|e| (-32000, e.to_string()))?;
             Ok(json!({
                 "content": [{"type":"text","text":"cleaned"}],
+                "isError": false
+            }))
+        }
+        "clicom_exec_detached" => {
+            let cmd_arr = args.get("cmd").and_then(|v| v.as_array())
+                .ok_or((-32602, "missing array 'cmd'".to_string()))?;
+            let argv: Vec<String> = cmd_arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if argv.is_empty() {
+                return Err((-32602, "empty 'cmd' array".to_string()));
+            }
+            let pid = crate::clicom_cli::cmd_exec_detached::spawn_detached(&argv)
+                .map_err(|e| (-32000, e.to_string()))?;
+            Ok(json!({
+                "content": [{"type":"text","text": pid.to_string()}],
                 "isError": false
             }))
         }
