@@ -76,9 +76,10 @@ pub fn spawn_watcher(
                 let out_p = layout::out_path(&instance_dir, &id);
                 let err_p = layout::err_path(&instance_dir, &id);
                 let done_p = layout::done_path(&instance_dir, &id);
+                let log_p = layout::log_path(&instance_dir, &id);
                 let deadline = Instant::now() + Duration::from_millis(default_timeout_ms);
                 let _ = rhai_host::execute_script_to_files(
-                    &engine, &source, &out_p, &err_p, &done_p, deadline, &host_ctx,
+                    &engine, &source, &out_p, &err_p, &done_p, &log_p, deadline, &host_ctx,
                 );
                 let _ = std::fs::remove_file(&rhai);
                 let _ = retention::evict_result_triples(&cmd_dir_clone, 10);

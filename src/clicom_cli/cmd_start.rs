@@ -104,6 +104,7 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
         idle_observer: Arc::clone(&detector),
         script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
         current_deadline: Arc::new(std::sync::Mutex::new(None)),
+        print_buffer: Arc::new(std::sync::Mutex::new(String::new())),
     });
     let mut engine = rhai_host::build_engine();
     rhai_host::register_host_fns(&mut engine, Arc::clone(&ctx));
