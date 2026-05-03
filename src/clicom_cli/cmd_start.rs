@@ -112,16 +112,41 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
 
 fn spawn_and_forward_pty(
     command: &[String],
-    _strip_mouse: bool,  // wire to forwarding helper that strips mouse if false-default per spec
+    mouse_allow: bool,  // true = --mouse flag was passed (allow passthrough); false = strip
     screen: &Arc<ScreenBuffer>,
     detector: &Arc<std::sync::Mutex<IdleDetector>>,
-    _idle_tx: &crossbeam_channel::Sender<IdleEvent>,
+    idle_tx: &crossbeam_channel::Sender<IdleEvent>,
 ) -> Result<i32> {
-    // Bridge to engine::pty / engine::forwarding using their existing entry points
-    // (refer to ../cliagentchat for the exact call signatures and adapt).
-    // Returns child exit code.
-    let _ = (command, screen, detector);
-    todo!("wire engine::pty + engine::forwarding here, mirroring the inboxmcp wrap loop")
+    use crate::clicom_engine::forwarding::{spawn_input_forwarder, spawn_output_forwarder, AgentBytes};
+    use crate::clicom_engine::pty::{spawn as pty_spawn, current_terminal_size};
+    let strip_mouse = !mouse_allow;
+    let mut pty = pty_spawn(command.to_vec(), current_terminal_size())?;
+    let writer = pty.pair.master.take_writer()?;
+    let reader = pty.pair.master.try_clone_reader()?;
+    let (_nudge_tx, nudge_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+    let (tap_tx, tap_rx) = crossbeam_channel::unbounded::<AgentBytes>();
+    let _in_h = spawn_input_forwarder(writer, nudge_rx);
+    let _out_h = spawn_output_forwarder(reader, tap_tx, strip_mouse);
+    // Bridge tap → screen + idle.
+    let screen_clone = Arc::clone(screen);
+    let det_clone = Arc::clone(detector);
+    let bridge = std::thread::spawn(move || {
+        while let Ok(msg) = tap_rx.recv() {
+            match msg {
+                AgentBytes::Chunk(bytes) => {
+                    screen_clone.advance_bytes(&bytes);
+                    if let Ok(mut d) = det_clone.lock() {
+                        let _ = d.note_byte(std::time::Instant::now());
+                    }
+                }
+                AgentBytes::Eof => break,
+            }
+        }
+    });
+    let status = pty.child.wait()?;
+    let _ = bridge.join();
+    let _ = idle_tx; // detector ticker thread will react
+    Ok(status.exit_code() as i32)
 }
 
 fn spawn_and_forward_nopty(
