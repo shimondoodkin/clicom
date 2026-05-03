@@ -36,6 +36,25 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
             .map_err(|_| Box::new(rhai::EvalAltResult::ErrorRuntime("type_text: channel closed".into(), rhai::Position::NONE)))?;
         Ok(())
     });
+
+    // screen_text
+    let c = Arc::clone(&ctx);
+    engine.register_fn("screen_text", move || -> String { c.screen.to_plain_text() });
+
+    // screen_save
+    let c = Arc::clone(&ctx);
+    engine.register_fn("screen_save", move |path: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+        let body = c.screen.to_plain_text();
+        let resolved = resolve_path(&c.instance_cwd, path);
+        crate::clicom_engine::fs_atomic::write(&resolved, body.as_bytes())
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("fs: {e}").into(), rhai::Position::NONE)))?;
+        Ok(body.as_bytes().len() as i64)
+    });
+}
+
+fn resolve_path(cwd: &std::path::Path, p: &str) -> std::path::PathBuf {
+    let pp = std::path::Path::new(p);
+    if pp.is_absolute() { pp.to_path_buf() } else { cwd.join(pp) }
 }
 
 pub fn run_script(engine: &Engine, source: &str) -> Result<rhai::Dynamic, rhai::EvalAltResult> {
@@ -60,6 +79,24 @@ mod tests {
         let e = build_engine();
         let r = run_script(&e, "eval(\"1+1\")");
         assert!(r.is_err(), "expected eval to be disabled");
+    }
+
+    #[test]
+    fn screen_text_returns_visible_text() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        screen.advance_bytes(b"hello world\n");
+        let ctx = Arc::new(HostContext {
+            screen: Arc::clone(&screen),
+            nudge_tx: tx,
+            instance_cwd: std::env::temp_dir(),
+            idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
+        });
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, "screen_text()").unwrap();
+        let s = v.into_string().unwrap();
+        assert!(s.contains("hello"), "got: {s:?}");
     }
 
     #[test]
