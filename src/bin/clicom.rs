@@ -36,6 +36,8 @@ enum Cmd {
         id: Option<String>,
     },
     Help { topic: Option<String> },
+    /// Start a stdio MCP server exposing clicom's driver ops as tools.
+    Mcp,
 }
 
 fn read_script_source(arg: Option<&str>, file: Option<&str>) -> anyhow::Result<String> {
@@ -77,6 +79,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Clean { partial, id } =>
             clicom::clicom_cli::cmd_clean::run(&cwd, partial.as_deref(), id.as_deref())?,
         Cmd::Help { topic } => clicom::clicom_cli::cmd_help::run(topic.as_deref()),
+        Cmd::Mcp => clicom::clicom_cli::cmd_mcp::run(&cwd)?,
     };
     std::process::exit(code);
 }

@@ -6,3 +6,4 @@ pub mod drop;
 pub mod cmd_queue;
 pub mod cmd_run;
 pub mod cmd_clean;
+pub mod cmd_mcp;
