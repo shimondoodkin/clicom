@@ -62,3 +62,19 @@ fn set_timeout_overrides_default() {
     assert!(elapsed < Duration::from_secs(2), "should abort fast, took {:?}", elapsed);
     let _ = child.kill(); let _ = child.wait();
 }
+
+#[test]
+fn print_lands_on_driver_stderr() {
+    let td = TempDir::new().unwrap();
+    let mut child = start_wrapper(&td);
+    let out = Command::cargo_bin("clicom").unwrap()
+        .current_dir(td.path())
+        .args(["run", "", "print(\"hello from script\"); 42"])
+        .output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "expected exit 0, got {:?}\nstderr: {}", out.status.code(), String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("42"), "expected 42 in stdout, got: {stdout:?}");
+    assert!(stderr.contains("hello from script"), "expected print output in stderr, got: {stderr:?}");
+    let _ = child.kill(); let _ = child.wait();
+}
