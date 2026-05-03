@@ -23,7 +23,7 @@ pub fn run(cwd: &Path, partial: Option<&str>, id: Option<&str>) -> Result<i32> {
     let cmds = layout::commands_dir(inst);
 
     if let Some(id) = id {
-        for ext in &["out", "err", "done"] {
+        for ext in &["out", "err", "done", "log"] {
             let _ = std::fs::remove_file(cmds.join(format!("{id}.{ext}")));
         }
     } else {
@@ -39,7 +39,7 @@ pub fn run(cwd: &Path, partial: Option<&str>, id: Option<&str>) -> Result<i32> {
             }
         }
         for id in &done_ids {
-            for ext in &["out", "err", "done"] {
+            for ext in &["out", "err", "done", "log"] {
                 let _ = std::fs::remove_file(cmds.join(format!("{id}.{ext}")));
             }
         }

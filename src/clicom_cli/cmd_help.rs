@@ -69,7 +69,15 @@ fn host_fns_help() -> String {
      \n\
      Status & control:\n\
        status() -> Map { state, last_activity, lifetime_lines, trimmed_below, visible_rows, visible_cols }\n\
-       set_timeout(ms: i64) -> ()\n".into()
+       set_timeout(ms: i64) -> ()\n\
+     \n\
+     JSON:\n\
+       parse_json(s: String) -> Dynamic\n\
+       to_json(v: Dynamic)   -> String\n\
+     \n\
+     Diagnostic output (captured to <id>.log, surfaced to driver stderr):\n\
+       print(...)   // built-in\n\
+       debug(...)   // built-in\n".into()
 }
 fn script_help() -> String { "See https://rhai.rs/book/ for the language reference.\n".into() }
 fn layout_help() -> String { "Layout under <cwd>/.clicom/<pid>-<rand6>/:\n  meta.json status.json screen.txt commands.lock commands/<id>.{rhai,out,err,done}\n".into() }

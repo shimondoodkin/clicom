@@ -62,6 +62,15 @@ pub fn run(cwd: &Path, args: RunArgs) -> Result<i32> {
         guard = Some(drop_h::acquire_lock(&inst)?);
     }
 
+    // Emit any print/debug output captured to .log before result.
+    let log_p = layout::log_path(&inst, &id);
+    if log_p.exists() {
+        if let Ok(log_contents) = std::fs::read_to_string(&log_p) {
+            eprintln!("{}", log_contents.trim_end());
+        }
+        let _ = std::fs::remove_file(&log_p);
+    }
+
     let body = std::fs::read_to_string(&done)?.trim().to_string();
     let exit = if body.starts_with("OK") {
         let out = std::fs::read_to_string(layout::out_path(&inst, &id))?;

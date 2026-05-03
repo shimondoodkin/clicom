@@ -61,7 +61,7 @@ pub fn evict_result_triples(commands_dir: &Path, keep: usize) -> anyhow::Result<
     done_ids.sort();
     if done_ids.len() <= keep { return Ok(()); }
     for id in done_ids.iter().take(done_ids.len() - keep) {
-        for ext in &[".out", ".err", ".done"] {
+        for ext in &[".out", ".err", ".done", ".log"] {
             let _ = fs::remove_file(commands_dir.join(format!("{}{}", id, ext)));
         }
     }
