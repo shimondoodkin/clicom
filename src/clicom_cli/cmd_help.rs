@@ -1,5 +1,30 @@
 //! `clicom help` — top-level + topic-specific help.
 
+const QUICKSTART: &str = "\
+clicom — file-based command channel for wrapped CLI agents
+
+QUICK START
+
+  In one terminal (wraps the agent and stays alive for its session):
+      clicom start -- claude
+
+  In another terminal in the same directory (drives the agent):
+      clicom run \"type_text(\\\"hello\\n\\\")\"
+      clicom run \"wait_idle(800); screen_text()\"
+      clicom run \"type_keys(\\\"[Up][Enter]\\\")\"
+
+  Inspect:
+      clicom status            # list live + recent instances
+      clicom help              # subcommand reference
+      clicom help host-fns     # all Rhai host functions
+      clicom help script       # Rhai language cheatsheet
+";
+
+pub fn quickstart() -> i32 {
+    println!("{QUICKSTART}");
+    0
+}
+
 const TOP_LEVEL: &str = "\
 clicom — file-based command channel for wrapped CLI agents
 

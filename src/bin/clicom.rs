@@ -2,10 +2,10 @@ use clap::{Parser, Subcommand};
 use clicom::clicom_cli::cmd_run::BusyMode;
 
 #[derive(Parser)]
-#[command(name = "clicom", disable_help_subcommand = true)]
+#[command(name = "clicom", disable_help_subcommand = true, arg_required_else_help = false)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -52,7 +52,11 @@ fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
-    let code = match cli.cmd {
+    let cmd = match cli.cmd {
+        Some(c) => c,
+        None => std::process::exit(clicom::clicom_cli::cmd_help::quickstart()),
+    };
+    let code = match cmd {
         Cmd::Start { mouse, nopty, name, command } => {
             clicom::clicom_cli::cmd_start::run(&cwd, clicom::clicom_cli::cmd_start::StartArgs { mouse, nopty, name, command })?
         }
