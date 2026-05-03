@@ -13,6 +13,7 @@ pub mod nopty;
 pub mod forwarding;
 pub mod retention;
 pub mod mouse_filter;
+pub mod watcher;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
