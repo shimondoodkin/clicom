@@ -51,6 +51,53 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
         Ok(body.as_bytes().len() as i64)
     });
 
+    // screen_last_after
+    let c = Arc::clone(&ctx);
+    engine.register_fn("screen_last_after", move |marker: &str| -> String {
+        let lifetime = c.screen.lifetime_text();
+        match lifetime.rfind(marker) {
+            Some(idx) => lifetime[idx + marker.len()..].to_string(),
+            None => String::new(),
+        }
+    });
+
+    // screen_save_last_after
+    let c = Arc::clone(&ctx);
+    engine.register_fn("screen_save_last_after", move |path: &str, marker: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+        let lifetime = c.screen.lifetime_text();
+        let body = match lifetime.rfind(marker) { Some(i) => lifetime[i + marker.len()..].to_string(), None => String::new() };
+        let resolved = resolve_path(&c.instance_cwd, path);
+        crate::clicom_engine::fs_atomic::write(&resolved, body.as_bytes())
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("fs: {e}").into(), rhai::Position::NONE)))?;
+        Ok(body.as_bytes().len() as i64)
+    });
+
+    // screen_last_after_re
+    let c = Arc::clone(&ctx);
+    engine.register_fn("screen_last_after_re", move |pattern: &str| -> Result<String, Box<rhai::EvalAltResult>> {
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("regex compile: {e}").into(), rhai::Position::NONE)))?;
+        let lifetime = c.screen.lifetime_text();
+        let mut last_end: Option<usize> = None;
+        for m in re.find_iter(&lifetime) { last_end = Some(m.end()); }
+        Ok(last_end.map(|i| lifetime[i..].to_string()).unwrap_or_default())
+    });
+
+    // screen_save_last_after_re
+    let c = Arc::clone(&ctx);
+    engine.register_fn("screen_save_last_after_re", move |path: &str, pattern: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("regex compile: {e}").into(), rhai::Position::NONE)))?;
+        let lifetime = c.screen.lifetime_text();
+        let mut last_end: Option<usize> = None;
+        for m in re.find_iter(&lifetime) { last_end = Some(m.end()); }
+        let body = last_end.map(|i| lifetime[i..].to_string()).unwrap_or_default();
+        let resolved = resolve_path(&c.instance_cwd, path);
+        crate::clicom_engine::fs_atomic::write(&resolved, body.as_bytes())
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("fs: {e}").into(), rhai::Position::NONE)))?;
+        Ok(body.as_bytes().len() as i64)
+    });
+
     // screen_tail_text
     let c = Arc::clone(&ctx);
     engine.register_fn("screen_tail_text", move |from: i64, to: i64| -> Result<String, Box<rhai::EvalAltResult>> {
@@ -130,6 +177,36 @@ mod tests {
         let e = build_engine();
         let r = run_script(&e, "eval(\"1+1\")");
         assert!(r.is_err(), "expected eval to be disabled");
+    }
+
+    #[test]
+    fn last_after_literal_returns_post_marker_tail() {
+        let screen = Arc::new(ScreenBuffer::new(20, 80));
+        screen.advance_bytes(b"prelude marker tail\n");
+        let mut e = build_engine();
+        register_host_fns(&mut e, make_ctx(Arc::clone(&screen)));
+        let v = run_script(&e, "screen_last_after(\"marker\")").unwrap();
+        let s = v.into_string().unwrap();
+        assert!(s.contains("tail"));
+    }
+
+    #[test]
+    fn last_after_marker_not_found_returns_empty() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        screen.advance_bytes(b"nothing here\n");
+        let mut e = build_engine();
+        register_host_fns(&mut e, make_ctx(Arc::clone(&screen)));
+        let v = run_script(&e, "screen_last_after(\"absent\")").unwrap();
+        assert_eq!(v.into_string().unwrap(), "");
+    }
+
+    #[test]
+    fn last_after_re_compile_error_throws() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        let mut e = build_engine();
+        register_host_fns(&mut e, make_ctx(Arc::clone(&screen)));
+        let r = run_script(&e, "screen_last_after_re(\"(\")");
+        assert!(r.is_err());
     }
 
     fn make_ctx(screen: Arc<ScreenBuffer>) -> Arc<HostContext> {
