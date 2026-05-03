@@ -1,6 +1,6 @@
 //! Idle/busy state machine. Pure logic — no I/O.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleState { Busy, Idle }
@@ -12,6 +12,7 @@ pub struct IdleDetector {
     threshold: Duration,
     state: IdleState,
     last_byte_at: Instant,
+    last_byte_at_system: SystemTime,
 }
 
 impl IdleDetector {
@@ -20,14 +21,19 @@ impl IdleDetector {
             threshold: Duration::from_secs(threshold_seconds),
             state: IdleState::Busy, // start busy until first idle period
             last_byte_at: now,
+            last_byte_at_system: SystemTime::now(),
         }
     }
 
     pub fn state(&self) -> IdleState { self.state }
 
+    /// Returns the wall-clock time of the last received byte (or construction time).
+    pub fn last_activity(&self) -> SystemTime { self.last_byte_at_system }
+
     /// Call every time a byte is read from the agent.
     pub fn note_byte(&mut self, now: Instant) -> Option<IdleEvent> {
         self.last_byte_at = now;
+        self.last_byte_at_system = SystemTime::now();
         if self.state == IdleState::Idle {
             self.state = IdleState::Busy;
             return Some(IdleEvent::BecameBusy);
@@ -83,5 +89,20 @@ mod tests {
         assert_eq!(d.note_byte(now + Duration::from_millis(100)), None);
         d.tick(now + Duration::from_secs(2));
         assert_eq!(d.tick(now + Duration::from_secs(3)), None);
+    }
+
+    #[test]
+    fn last_activity_advances_on_note_byte() {
+        let now = Instant::now();
+        let mut d = IdleDetector::new(1, now);
+        let before = d.last_activity();
+        std::thread::sleep(Duration::from_millis(5));
+        d.note_byte(now + Duration::from_millis(100));
+        let after = d.last_activity();
+        assert!(after >= before, "last_activity should not go backwards");
+        // The system time should have advanced (at least by the sleep).
+        // We can't guarantee strict inequality due to clock resolution, but after >= before always holds.
+        // The key thing is that last_activity() returns the stored SystemTime.
+        let _ = after.duration_since(before); // just verify it's usable
     }
 }

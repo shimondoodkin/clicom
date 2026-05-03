@@ -134,9 +134,12 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
     let c = Arc::clone(&ctx);
     engine.register_fn("status", move || -> rhai::Map {
         let mut m = rhai::Map::new();
-        let st = c.idle_observer.lock().map(|d| d.state()).unwrap_or(crate::clicom_engine::idle::IdleState::Busy);
+        let (st, last_sys) = c.idle_observer.lock()
+            .map(|d| (d.state(), d.last_activity()))
+            .unwrap_or((crate::clicom_engine::idle::IdleState::Busy, std::time::SystemTime::now()));
         m.insert("state".into(), format!("{:?}", st).to_lowercase().into());
-        m.insert("last_activity".into(), chrono::Utc::now().to_rfc3339().into());
+        let last_activity_str = chrono::DateTime::<chrono::Utc>::from(last_sys).to_rfc3339();
+        m.insert("last_activity".into(), last_activity_str.into());
         let (lt, tb) = c.screen.lifetime_info();
         m.insert("lifetime_lines".into(), (lt as i64).into());
         m.insert("trimmed_below".into(), (tb as i64).into());
