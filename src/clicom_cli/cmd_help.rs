@@ -46,7 +46,8 @@ fn host_fns_help() -> String {
     "Rhai host functions registered by the wrapper:\n\
      \n\
      PTY input:\n\
-       type_text(s: String) -> ()\n\
+       type_text(s: String, translate=true) -> ()    // sends s; translate=true: \\n -> \\r (typed-Enter); false: raw passthrough\n\
+       type_keys(spec: String) -> ()                  // bracketed shortcut keys: [Ctrl+C] [Up] [Enter] [F5] [Tab] etc; plain text outside brackets passes through\n\
      \n\
      Visible screen:\n\
        screen_text() -> String\n\
@@ -74,6 +75,19 @@ fn host_fns_help() -> String {
      JSON:\n\
        parse_json(s: String) -> Dynamic\n\
        to_json(v: Dynamic)   -> String\n\
+     \n\
+     File I/O (paths relative to wrapper cwd):\n\
+       read_file(path: String) -> String\n\
+       write_file(path: String, content: String) -> i64\n\
+       append_file(path: String, content: String) -> i64\n\
+       delete_file(path: String) -> ()\n\
+       mkdirp(path: String) -> ()\n\
+     \n\
+     Network:\n\
+       fetch_url(url: String) -> Map { status, body }\n\
+     \n\
+     Shell (uses host's cmd /C or sh -c):\n\
+       shell_execute(command: String) -> Map { exit_code, stdout, stderr }\n\
      \n\
      Diagnostic output (captured to <id>.log, surfaced to driver stderr):\n\
        print(...)   // built-in\n\

@@ -6,6 +6,111 @@ use rhai::{Engine, Scope};
 use std::sync::Arc;
 use crate::clicom_engine::screen::ScreenBuffer;
 
+// ── Input helpers ─────────────────────────────────────────────────────────────
+
+/// Translate bare `\n` → `\r` while leaving existing `\r\n` intact.
+fn translate_newlines(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            let prev = if i == 0 { 0u8 } else { bytes[i - 1] };
+            if prev == b'\r' {
+                out.push(b'\n');
+            } else {
+                out.push(b'\r');
+            }
+        } else {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// Parse a key-spec string with bracketed tokens (e.g. `"hi[Enter][Ctrl+C]"`) into bytes.
+fn parse_key_spec(spec: &str) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut chars = spec.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            let mut tok = String::new();
+            let mut closed = false;
+            while let Some(&nc) = chars.peek() {
+                chars.next();
+                if nc == ']' {
+                    closed = true;
+                    break;
+                }
+                tok.push(nc);
+            }
+            if !closed {
+                return Err(format!("unterminated key token starting at '[{tok}'"));
+            }
+            let bytes = lookup_key(&tok)?;
+            out.extend_from_slice(&bytes);
+        } else {
+            // Plain char — UTF-8 encode it verbatim (no newline translation).
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            out.extend_from_slice(s.as_bytes());
+        }
+    }
+    Ok(out)
+}
+
+fn lookup_key(tok: &str) -> Result<Vec<u8>, String> {
+    let t = tok.to_lowercase();
+    // Modifiers: ctrl+X, alt+X
+    if let Some(rest) = t.strip_prefix("ctrl+") {
+        let mut chs = rest.chars();
+        let c = chs.next().ok_or_else(|| "empty Ctrl+".to_string())?;
+        if chs.next().is_some() {
+            return Err(format!("unsupported Ctrl chord: '{tok}'"));
+        }
+        let b = (c.to_ascii_uppercase() as u8) & 0x1f;
+        return Ok(vec![b]);
+    }
+    if let Some(rest) = t.strip_prefix("alt+") {
+        if rest.is_empty() {
+            return Err("empty Alt+".to_string());
+        }
+        let mut bytes = vec![0x1b];
+        bytes.extend_from_slice(rest.as_bytes());
+        return Ok(bytes);
+    }
+    let bytes: &[u8] = match t.as_str() {
+        "enter"              => b"\r",
+        "tab"                => b"\t",
+        "backspace"          => b"\x7f",
+        "esc" | "escape"     => b"\x1b",
+        "space"              => b" ",
+        "up"                 => b"\x1b[A",
+        "down"               => b"\x1b[B",
+        "right"              => b"\x1b[C",
+        "left"               => b"\x1b[D",
+        "home"               => b"\x1b[H",
+        "end"                => b"\x1b[F",
+        "pageup" | "page_up"     => b"\x1b[5~",
+        "pagedown" | "page_down" => b"\x1b[6~",
+        "insert"             => b"\x1b[2~",
+        "delete"             => b"\x1b[3~",
+        "f1"                 => b"\x1bOP",
+        "f2"                 => b"\x1bOQ",
+        "f3"                 => b"\x1bOR",
+        "f4"                 => b"\x1bOS",
+        "f5"                 => b"\x1b[15~",
+        "f6"                 => b"\x1b[17~",
+        "f7"                 => b"\x1b[18~",
+        "f8"                 => b"\x1b[19~",
+        "f9"                 => b"\x1b[20~",
+        "f10"                => b"\x1b[21~",
+        "f11"                => b"\x1b[23~",
+        "f12"                => b"\x1b[24~",
+        _ => return Err(format!("unknown key '{tok}'")),
+    };
+    Ok(bytes.to_vec())
+}
+
 pub struct HostContext {
     pub screen: Arc<ScreenBuffer>,
     pub nudge_tx: crossbeam_channel::Sender<Vec<u8>>,
@@ -36,11 +141,30 @@ fn env_or_default(name: &str, def: usize) -> usize {
 }
 
 pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
-    // type_text
+    // type_text(s) — default: translate bare \n to \r
     let c = Arc::clone(&ctx);
     engine.register_fn("type_text", move |s: &str| -> Result<(), Box<rhai::EvalAltResult>> {
-        c.nudge_tx.send(s.as_bytes().to_vec())
+        c.nudge_tx.send(translate_newlines(s))
             .map_err(|_| Box::new(rhai::EvalAltResult::ErrorRuntime("type_text: channel closed".into(), rhai::Position::NONE)))?;
+        Ok(())
+    });
+
+    // type_text(s, translate) — explicit translate flag
+    let c = Arc::clone(&ctx);
+    engine.register_fn("type_text", move |s: &str, translate: bool| -> Result<(), Box<rhai::EvalAltResult>> {
+        let bytes = if translate { translate_newlines(s) } else { s.as_bytes().to_vec() };
+        c.nudge_tx.send(bytes)
+            .map_err(|_| Box::new(rhai::EvalAltResult::ErrorRuntime("type_text: channel closed".into(), rhai::Position::NONE)))?;
+        Ok(())
+    });
+
+    // type_keys — bracketed shortcut key spec
+    let c = Arc::clone(&ctx);
+    engine.register_fn("type_keys", move |spec: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+        let bytes = parse_key_spec(spec)
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("type_keys: {e}").into(), rhai::Position::NONE)))?;
+        c.nudge_tx.send(bytes)
+            .map_err(|_| Box::new(rhai::EvalAltResult::ErrorRuntime("type_keys: channel closed".into(), rhai::Position::NONE)))?;
         Ok(())
     });
 
@@ -198,6 +322,105 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
         m.insert("total_lifetime".into(), (r.total_lifetime as i64).into());
         m.insert("trimmed_below".into(),  (r.trimmed_below as i64).into());
         m.insert("bytes".into(),       (body.as_bytes().len() as i64).into());
+        Ok(m)
+    });
+
+    // ── File I/O ──────────────────────────────────────────────────────────────
+
+    // read_file(path) -> String
+    let c = Arc::clone(&ctx);
+    engine.register_fn("read_file", move |path: &str| -> Result<String, Box<rhai::EvalAltResult>> {
+        let p = resolve_path(&c.instance_cwd, path);
+        std::fs::read_to_string(&p).map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
+            format!("fs: read_file({}): {e}", p.display()).into(), rhai::Position::NONE)))
+    });
+
+    // write_file(path, content) -> i64
+    let c = Arc::clone(&ctx);
+    engine.register_fn("write_file", move |path: &str, content: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+        let p = resolve_path(&c.instance_cwd, path);
+        crate::clicom_engine::fs_atomic::write(&p, content.as_bytes())
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
+                format!("fs: write_file({}): {e}", p.display()).into(), rhai::Position::NONE)))?;
+        Ok(content.as_bytes().len() as i64)
+    });
+
+    // append_file(path, content) -> i64
+    let c = Arc::clone(&ctx);
+    engine.register_fn("append_file", move |path: &str, content: &str| -> Result<i64, Box<rhai::EvalAltResult>> {
+        use std::io::Write;
+        let p = resolve_path(&c.instance_cwd, path);
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&p)
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
+                format!("fs: append_file open({}): {e}", p.display()).into(), rhai::Position::NONE)))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
+                format!("fs: append_file write({}): {e}", p.display()).into(), rhai::Position::NONE)))?;
+        Ok(content.as_bytes().len() as i64)
+    });
+
+    // delete_file(path) -> ()  — no error if file is absent
+    let c = Arc::clone(&ctx);
+    engine.register_fn("delete_file", move |path: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+        let p = resolve_path(&c.instance_cwd, path);
+        match std::fs::remove_file(&p) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Box::new(rhai::EvalAltResult::ErrorRuntime(
+                format!("fs: delete_file({}): {e}", p.display()).into(), rhai::Position::NONE))),
+        }
+    });
+
+    // mkdirp(path) -> ()
+    let c = Arc::clone(&ctx);
+    engine.register_fn("mkdirp", move |path: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+        let p = resolve_path(&c.instance_cwd, path);
+        std::fs::create_dir_all(&p)
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
+                format!("fs: mkdirp({}): {e}", p.display()).into(), rhai::Position::NONE)))
+    });
+
+    // ── Network ───────────────────────────────────────────────────────────────
+
+    // fetch_url(url) -> Map { status, body }
+    engine.register_fn("fetch_url", move |url: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(30))
+            .build();
+        let mut m = rhai::Map::new();
+        match agent.get(url).call() {
+            Ok(r) => {
+                m.insert("status".into(), (r.status() as i64).into());
+                let body = r.into_string().map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
+                    format!("fetch_url: read body: {e}").into(), rhai::Position::NONE)))?;
+                m.insert("body".into(), body.into());
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                m.insert("status".into(), (code as i64).into());
+                m.insert("body".into(), r.into_string().unwrap_or_default().into());
+            }
+            Err(e) => return Err(Box::new(rhai::EvalAltResult::ErrorRuntime(
+                format!("fetch_url: {e}").into(), rhai::Position::NONE))),
+        }
+        Ok(m)
+    });
+
+    // ── Shell ─────────────────────────────────────────────────────────────────
+
+    // shell_execute(cmd) -> Map { exit_code, stdout, stderr }
+    engine.register_fn("shell_execute", move |cmd: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
+        use std::process::Command;
+        let output = if cfg!(target_os = "windows") {
+            Command::new("cmd").arg("/C").arg(cmd).output()
+        } else {
+            Command::new("sh").arg("-c").arg(cmd).output()
+        }
+        .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(
+            format!("shell_execute: spawn: {e}").into(), rhai::Position::NONE)))?;
+        let mut m = rhai::Map::new();
+        m.insert("exit_code".into(), (output.status.code().unwrap_or(-1) as i64).into());
+        m.insert("stdout".into(), String::from_utf8_lossy(&output.stdout).to_string().into());
+        m.insert("stderr".into(), String::from_utf8_lossy(&output.stderr).to_string().into());
         Ok(m)
     });
 
@@ -443,7 +666,7 @@ fn classify_error(e: &rhai::EvalAltResult) -> &'static str {
             if s.contains("timeout") { "host_fn" }
             else if s.contains("requested below trim watermark") { "range" }
             else if s.starts_with("fs:") { "fs" }
-            else if s.contains("cap exceeded") || s.contains("type_text:") { "host_fn" }
+            else if s.contains("cap exceeded") || s.contains("type_text:") || s.contains("type_keys:") || s.contains("shell_execute:") { "host_fn" }
             else { "runtime" }
         }
         ErrorTooManyOperations(_) => "runtime",
@@ -530,16 +753,35 @@ mod tests {
     }
 
     fn make_ctx(screen: Arc<ScreenBuffer>) -> Arc<HostContext> {
+        make_ctx_with_cwd(screen, std::env::temp_dir())
+    }
+
+    fn make_ctx_with_cwd(screen: Arc<ScreenBuffer>, cwd: std::path::PathBuf) -> Arc<HostContext> {
         let (tx, _rx) = crossbeam_channel::unbounded();
         Arc::new(HostContext {
             screen,
             nudge_tx: tx,
-            instance_cwd: std::env::temp_dir(),
+            instance_cwd: cwd,
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
             script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
             current_deadline: Arc::new(std::sync::Mutex::new(None)),
             print_buffer: Arc::new(std::sync::Mutex::new(String::new())),
         })
+    }
+
+    /// Build a fresh ctx with its own accessible rx channel.
+    fn make_ctx_with_rx(cwd: std::path::PathBuf) -> (Arc<HostContext>, crossbeam_channel::Receiver<Vec<u8>>) {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let ctx = Arc::new(HostContext {
+            screen: Arc::new(ScreenBuffer::new(10, 80)),
+            nudge_tx: tx,
+            instance_cwd: cwd,
+            idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
+            script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
+            current_deadline: Arc::new(std::sync::Mutex::new(None)),
+            print_buffer: Arc::new(std::sync::Mutex::new(String::new())),
+        });
+        (ctx, rx)
     }
 
     #[test]
@@ -638,7 +880,8 @@ mod tests {
         register_host_fns(&mut e, ctx2);
         let _ = run_script(&e, "type_text(\"hi\\n\")").unwrap();
         let bytes = rx.recv().unwrap();
-        assert_eq!(bytes, b"hi\n");
+        // Default translation: bare \n → \r
+        assert_eq!(bytes, b"hi\r");
     }
 
     #[test]
@@ -788,5 +1031,152 @@ mod tests {
         );
         assert!(matches!(outcome, ScriptOutcome::Ok));
         assert!(!log.exists(), "log file should NOT exist when no print/debug used");
+    }
+
+    // ── type_text translate tests ─────────────────────────────────────────────
+
+    #[test]
+    fn type_text_raw_passthrough() {
+        let (ctx, rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "type_text(\"hi\\n\", false)").unwrap();
+        let bytes = rx.recv().unwrap();
+        assert_eq!(bytes, b"hi\n");
+    }
+
+    #[test]
+    fn type_text_preserves_existing_crlf() {
+        let (ctx, rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        // \r\n in the string literal: translate should NOT double the \r
+        let _ = run_script(&e, "type_text(\"hi\\r\\n\")").unwrap();
+        let bytes = rx.recv().unwrap();
+        assert_eq!(bytes, b"hi\r\n");
+    }
+
+    // ── type_keys tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn type_keys_basic_chord() {
+        let (ctx, rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "type_keys(\"[Ctrl+C]\")").unwrap();
+        let bytes = rx.recv().unwrap();
+        assert_eq!(bytes, b"\x03");
+    }
+
+    #[test]
+    fn type_keys_arrow_keys() {
+        let (ctx, rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "type_keys(\"[Up][Down]\")").unwrap();
+        let bytes = rx.recv().unwrap();
+        assert_eq!(bytes, b"\x1b[A\x1b[B");
+    }
+
+    #[test]
+    fn type_keys_mixed_text_and_keys() {
+        let (ctx, rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "type_keys(\"hi[Enter]\")").unwrap();
+        let bytes = rx.recv().unwrap();
+        assert_eq!(bytes, b"hi\r");
+    }
+
+    #[test]
+    fn type_keys_unknown_token_errors() {
+        let (ctx, _rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let r = run_script(&e, "type_keys(\"[NoSuchKey]\")");
+        assert!(r.is_err(), "expected error for unknown key token");
+    }
+
+    #[test]
+    fn type_keys_alt_chord() {
+        let (ctx, rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "type_keys(\"[Alt+a]\")").unwrap();
+        let bytes = rx.recv().unwrap();
+        assert_eq!(bytes, b"\x1ba");
+    }
+
+    #[test]
+    fn type_keys_unterminated_bracket_errors() {
+        let (ctx, _rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let r = run_script(&e, "type_keys(\"[Up\")");
+        assert!(r.is_err(), "expected error for unterminated bracket");
+    }
+
+    // ── File I/O tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn read_write_file_round_trip() {
+        let td = tempfile::TempDir::new().unwrap();
+        let (ctx, _rx) = make_ctx_with_rx(td.path().to_path_buf());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "write_file(\"rw.txt\", \"hello world\")").unwrap();
+        let v = run_script(&e, "read_file(\"rw.txt\")").unwrap();
+        let s = v.into_string().unwrap();
+        assert_eq!(s, "hello world");
+    }
+
+    #[test]
+    fn append_file_appends() {
+        let td = tempfile::TempDir::new().unwrap();
+        let (ctx, _rx) = make_ctx_with_rx(td.path().to_path_buf());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "write_file(\"app.txt\", \"part1\")").unwrap();
+        let _ = run_script(&e, "append_file(\"app.txt\", \"part2\")").unwrap();
+        let v = run_script(&e, "read_file(\"app.txt\")").unwrap();
+        let s = v.into_string().unwrap();
+        assert!(s.contains("part1") && s.contains("part2"), "got: {s:?}");
+    }
+
+    #[test]
+    fn delete_file_idempotent_for_missing() {
+        let td = tempfile::TempDir::new().unwrap();
+        let (ctx, _rx) = make_ctx_with_rx(td.path().to_path_buf());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        // Deleting a non-existent file must not error
+        let _ = run_script(&e, "delete_file(\"does_not_exist.txt\")").unwrap();
+    }
+
+    #[test]
+    fn mkdirp_creates_nested_dirs() {
+        let td = tempfile::TempDir::new().unwrap();
+        let (ctx, _rx) = make_ctx_with_rx(td.path().to_path_buf());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "mkdirp(\"a/b/c\")").unwrap();
+        assert!(td.path().join("a/b/c").is_dir());
+        // Calling twice must also be OK
+        let _ = run_script(&e, "mkdirp(\"a/b/c\")").unwrap();
+    }
+
+    // ── Shell test ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn shell_execute_runs_echo() {
+        let (ctx, _rx) = make_ctx_with_rx(std::env::temp_dir());
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, "shell_execute(\"echo hello\")").unwrap();
+        let m = v.try_cast::<rhai::Map>().unwrap();
+        let exit_code = m["exit_code"].clone().as_int().unwrap();
+        let stdout = m["stdout"].clone().into_string().unwrap();
+        assert_eq!(exit_code, 0);
+        assert!(stdout.contains("hello"), "stdout: {stdout:?}");
     }
 }
