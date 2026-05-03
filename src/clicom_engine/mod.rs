@@ -6,3 +6,4 @@ pub mod process;
 pub mod gitignore;
 pub mod screen;
 pub mod idle;
+pub mod nudge;
