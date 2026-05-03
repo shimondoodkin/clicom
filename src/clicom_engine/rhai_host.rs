@@ -13,6 +13,9 @@ pub struct HostContext {
     pub instance_cwd: std::path::PathBuf,
     pub idle_observer: Arc<std::sync::Mutex<crate::clicom_engine::idle::IdleDetector>>,
     pub script_timeout_override: Arc<std::sync::Mutex<Option<u64>>>,
+    /// Wall-clock deadline for the currently executing script. Set by execute_script_to_files,
+    /// read by the on_progress callback registered in register_host_fns.
+    pub current_deadline: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 pub fn build_engine() -> Engine {
@@ -155,8 +158,25 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
         if ms > 3_600_000 {
             return Err(Box::new(rhai::EvalAltResult::ErrorRuntime("set_timeout: cap exceeded".into(), rhai::Position::NONE)));
         }
+        let new_deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0) as u64);
+        // Update both: current_deadline for immediate on_progress enforcement,
+        // and script_timeout_override in case execute_script_to_files hasn't set current_deadline yet.
+        *c.current_deadline.lock().unwrap() = Some(new_deadline);
         *c.script_timeout_override.lock().unwrap() = Some(ms.max(0) as u64);
         Ok(())
+    });
+
+    // on_progress: abort script if wall-clock deadline has passed.
+    let deadline_holder = Arc::clone(&ctx.current_deadline);
+    engine.on_progress(move |_ops| {
+        if let Ok(guard) = deadline_holder.lock() {
+            if let Some(dl) = *guard {
+                if std::time::Instant::now() > dl {
+                    return Some(rhai::Dynamic::from(()));
+                }
+            }
+        }
+        None
     });
 
     // screen_tail_save
@@ -248,10 +268,26 @@ pub fn execute_script_to_files(
     err_path: &std::path::Path,
     done_path: &std::path::Path,
     deadline: std::time::Instant,
+    host_ctx: &Arc<HostContext>,
 ) -> ScriptOutcome {
+    // Compute effective deadline: script_timeout_override takes priority over default.
+    let effective_deadline = {
+        let mut ov = host_ctx.script_timeout_override.lock().unwrap();
+        if let Some(ms) = ov.take() {
+            std::time::Instant::now() + std::time::Duration::from_millis(ms)
+        } else {
+            deadline
+        }
+    };
+    // Arm the on_progress deadline checker.
+    *host_ctx.current_deadline.lock().unwrap() = Some(effective_deadline);
+
     let ast = match engine.compile(source) {
         Ok(ast) => ast,
-        Err(e) => return write_failure(out_path, err_path, done_path, "parse", &e.to_string()),
+        Err(e) => {
+            *host_ctx.current_deadline.lock().unwrap() = None;
+            return write_failure(out_path, err_path, done_path, "parse", &e.to_string());
+        }
     };
     let mut scope = rhai::Scope::new();
     let result: Result<rhai::Dynamic, Box<rhai::EvalAltResult>> =
@@ -260,11 +296,13 @@ pub fn execute_script_to_files(
         })) {
             Ok(r) => r,
             Err(_payload) => {
+                *host_ctx.current_deadline.lock().unwrap() = None;
                 return write_failure(out_path, err_path, done_path, "internal",
                                      "internal panic in script evaluation");
             }
         };
-    let _ = deadline; // wall-clock enforcement handled by on_progress; max_operations also caps
+    // Disarm deadline before processing result.
+    *host_ctx.current_deadline.lock().unwrap() = None;
     match result {
         Ok(v) => {
             let json = match dyn_to_json(&v) {
@@ -289,6 +327,7 @@ fn classify_error(e: &rhai::EvalAltResult) -> &'static str {
     use rhai::EvalAltResult::*;
     match e {
         ErrorParsing(_, _) => "parse",
+        ErrorTerminated(_, _) => "timeout",
         ErrorRuntime(msg, _) => {
             let s = msg.to_string();
             if s.contains("timeout") { "host_fn" }
@@ -399,6 +438,7 @@ mod tests {
             instance_cwd: std::env::temp_dir(),
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
             script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
+            current_deadline: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -425,16 +465,9 @@ mod tests {
 
     #[test]
     fn screen_text_returns_visible_text() {
-        let (tx, _rx) = crossbeam_channel::unbounded();
         let screen = Arc::new(ScreenBuffer::new(5, 80));
         screen.advance_bytes(b"hello world\n");
-        let ctx = Arc::new(HostContext {
-            screen: Arc::clone(&screen),
-            nudge_tx: tx,
-            instance_cwd: std::env::temp_dir(),
-            idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
-            script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
-        });
+        let ctx = make_ctx(Arc::clone(&screen));
         let mut e = build_engine();
         register_host_fns(&mut e, ctx);
         let v = run_script(&e, "screen_text()").unwrap();
@@ -448,11 +481,13 @@ mod tests {
         let out = td.path().join("id.out");
         let err = td.path().join("id.err");
         let done = td.path().join("id.done");
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
         let mut e = build_engine();
-        register_host_fns(&mut e, make_ctx(Arc::new(ScreenBuffer::new(5, 80))));
+        register_host_fns(&mut e, Arc::clone(&ctx));
         let outcome = execute_script_to_files(
             &e, "1 + 2", &out, &err, &done,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &ctx,
         );
         assert!(matches!(outcome, ScriptOutcome::Ok));
         let out_body = std::fs::read_to_string(&out).unwrap();
@@ -468,11 +503,13 @@ mod tests {
         let out = td.path().join("id.out");
         let err = td.path().join("id.err");
         let done = td.path().join("id.done");
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
         let mut e = build_engine();
-        register_host_fns(&mut e, make_ctx(Arc::new(ScreenBuffer::new(5, 80))));
+        register_host_fns(&mut e, Arc::clone(&ctx));
         let outcome = execute_script_to_files(
             &e, "let x: int = \"bad\";", &out, &err, &done,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &ctx,
         );
         assert!(matches!(outcome, ScriptOutcome::Err(_)));
         assert!(std::fs::read_to_string(&done).unwrap().starts_with("ERR "));
@@ -481,16 +518,21 @@ mod tests {
 
     #[test]
     fn type_text_pushes_into_channel() {
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(10, 80)));
+        // Grab rx before ctx is moved into register_host_fns.
+        // We need a fresh channel with rx accessible — use make_ctx and reconstruct.
         let (tx, rx) = crossbeam_channel::unbounded();
-        let ctx = Arc::new(HostContext {
+        let ctx2 = Arc::new(HostContext {
             screen: Arc::new(ScreenBuffer::new(10, 80)),
             nudge_tx: tx,
             instance_cwd: std::env::temp_dir(),
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
             script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
+            current_deadline: Arc::new(std::sync::Mutex::new(None)),
         });
+        let _ = ctx; // unused, suppress warning
         let mut e = build_engine();
-        register_host_fns(&mut e, ctx);
+        register_host_fns(&mut e, ctx2);
         let _ = run_script(&e, "type_text(\"hi\\n\")").unwrap();
         let bytes = rx.recv().unwrap();
         assert_eq!(bytes, b"hi\n");
@@ -502,16 +544,48 @@ mod tests {
         let out = td.path().join("id.out");
         let err = td.path().join("id.err");
         let done = td.path().join("id.done");
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
         let mut e = build_engine();
-        register_host_fns(&mut e, make_ctx(Arc::new(ScreenBuffer::new(5, 80))));
+        register_host_fns(&mut e, Arc::clone(&ctx));
         // Register a host fn that panics.
         e.register_fn("do_panic", || -> () { panic!("deliberate test panic"); });
         let outcome = execute_script_to_files(
             &e, "do_panic()", &out, &err, &done,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &ctx,
         );
         assert!(matches!(outcome, ScriptOutcome::Err("internal")));
         let done_body = std::fs::read_to_string(&done).unwrap();
         assert!(done_body.starts_with("ERR internal"), "got: {done_body:?}");
+    }
+
+    #[test]
+    fn set_timeout_aborts_long_wait_ms() {
+        let td = tempfile::TempDir::new().unwrap();
+        let out = td.path().join("id.out");
+        let err = td.path().join("id.err");
+        let done = td.path().join("id.done");
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        let mut e = build_engine();
+        register_host_fns(&mut e, Arc::clone(&ctx));
+        let start = std::time::Instant::now();
+        // set_timeout(500) then wait_ms(2000): should abort within ~600ms.
+        // Note: wait_ms sleeps in a tight loop; on_progress fires between rhai ops.
+        // The script will sleep 2s unless the deadline aborts it.
+        // We use a very short wait_ms loop to give on_progress a chance to fire.
+        let outcome = execute_script_to_files(
+            &e,
+            "set_timeout(500); let i = 0; loop { wait_ms(10); i += 1; if i > 300 { break; } }",
+            &out, &err, &done,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+            &ctx,
+        );
+        let elapsed = start.elapsed();
+        assert!(matches!(outcome, ScriptOutcome::Err("timeout")),
+                "expected timeout, got {:?}", std::fs::read_to_string(&done).ok());
+        assert!(elapsed < std::time::Duration::from_secs(3),
+                "should abort fast, took {:?}", elapsed);
+        let done_body = std::fs::read_to_string(&done).unwrap();
+        assert!(done_body.starts_with("ERR timeout"), "got: {done_body:?}");
     }
 }

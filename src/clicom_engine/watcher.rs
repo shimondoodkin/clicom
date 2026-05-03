@@ -22,6 +22,7 @@ impl Drop for WatcherHandle {
 pub fn spawn_watcher(
     instance_dir: PathBuf,
     engine_with_hostfns: Arc<rhai::Engine>,
+    host_ctx: Arc<rhai_host::HostContext>,
     default_timeout_ms: u64,
 ) -> Result<WatcherHandle> {
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -77,7 +78,7 @@ pub fn spawn_watcher(
                 let done_p = layout::done_path(&instance_dir, &id);
                 let deadline = Instant::now() + Duration::from_millis(default_timeout_ms);
                 let _ = rhai_host::execute_script_to_files(
-                    &engine, &source, &out_p, &err_p, &done_p, deadline,
+                    &engine, &source, &out_p, &err_p, &done_p, deadline, &host_ctx,
                 );
                 let _ = std::fs::remove_file(&rhai);
                 let _ = retention::evict_result_triples(&cmd_dir_clone, 10);

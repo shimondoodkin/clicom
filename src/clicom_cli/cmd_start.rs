@@ -103,11 +103,12 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
         instance_cwd: cwd.to_path_buf(),
         idle_observer: Arc::clone(&detector),
         script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
+        current_deadline: Arc::new(std::sync::Mutex::new(None)),
     });
     let mut engine = rhai_host::build_engine();
-    rhai_host::register_host_fns(&mut engine, ctx);
+    rhai_host::register_host_fns(&mut engine, Arc::clone(&ctx));
     let engine = Arc::new(engine);
-    let _watcher_guard = watcher::spawn_watcher(ch.instance_dir.clone(), Arc::clone(&engine), 60_000)?;
+    let _watcher_guard = watcher::spawn_watcher(ch.instance_dir.clone(), Arc::clone(&engine), Arc::clone(&ctx), 60_000)?;
 
     // Spawn child + forwarding loop. Uses pty/nopty per args.
     let exit_code = if args.nopty {
