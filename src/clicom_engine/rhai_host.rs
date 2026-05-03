@@ -16,6 +16,8 @@ pub struct HostContext {
     /// Wall-clock deadline for the currently executing script. Set by execute_script_to_files,
     /// read by the on_progress callback registered in register_host_fns.
     pub current_deadline: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Buffer for print() / debug() output; drained after each script execution.
+    pub print_buffer: Arc<std::sync::Mutex<String>>,
 }
 
 pub fn build_engine() -> Engine {
@@ -198,6 +200,37 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
         m.insert("bytes".into(),       (body.as_bytes().len() as i64).into());
         Ok(m)
     });
+
+    // parse_json
+    engine.register_fn("parse_json", |s: &str| -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
+        let v: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("parse_json: {e}").into(), rhai::Position::NONE)))?;
+        Ok(json_value_to_dynamic(v))
+    });
+
+    // to_json
+    engine.register_fn("to_json", |v: rhai::Dynamic| -> Result<String, Box<rhai::EvalAltResult>> {
+        dyn_to_json(&v).map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("to_json: {e}").into(), rhai::Position::NONE)))
+    });
+
+    // on_print: capture print() output to print_buffer
+    let c = Arc::clone(&ctx);
+    engine.on_print(move |s| {
+        if let Ok(mut buf) = c.print_buffer.lock() {
+            buf.push_str(s);
+            buf.push('\n');
+        }
+    });
+
+    // on_debug: capture debug() output to print_buffer
+    let c = Arc::clone(&ctx);
+    engine.on_debug(move |s, _src, _pos| {
+        if let Ok(mut buf) = c.print_buffer.lock() {
+            buf.push_str("[debug] ");
+            buf.push_str(s);
+            buf.push('\n');
+        }
+    });
 }
 
 fn resolve_path(cwd: &std::path::Path, p: &str) -> std::path::PathBuf {
@@ -250,6 +283,66 @@ fn resolve_indexes(buf: &ScreenBuffer, from: i64, to: i64) -> Result<(u64, u64),
     Ok((a, b))
 }
 
+// ── JSON helpers ─────────────────────────────────────────────────────────────
+
+fn json_value_to_dynamic(v: serde_json::Value) -> rhai::Dynamic {
+    use serde_json::Value;
+    match v {
+        Value::Null => rhai::Dynamic::UNIT,
+        Value::Bool(b) => rhai::Dynamic::from(b),
+        Value::Number(n) => {
+            if n.is_i64() {
+                rhai::Dynamic::from(n.as_i64().unwrap())
+            } else if n.is_f64() {
+                rhai::Dynamic::from(n.as_f64().unwrap())
+            } else {
+                rhai::Dynamic::from(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        Value::String(s) => rhai::Dynamic::from(s),
+        Value::Array(arr) => {
+            rhai::Dynamic::from(arr.into_iter().map(json_value_to_dynamic).collect::<rhai::Array>())
+        }
+        Value::Object(map) => {
+            rhai::Dynamic::from(
+                map.into_iter()
+                    .map(|(k, v)| (k.into(), json_value_to_dynamic(v)))
+                    .collect::<rhai::Map>()
+            )
+        }
+    }
+}
+
+fn dynamic_to_json_value(v: &rhai::Dynamic) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    if v.is_unit() { return Ok(Value::Null); }
+    if let Some(b) = v.clone().try_cast::<bool>() { return Ok(Value::Bool(b)); }
+    if let Some(i) = v.clone().try_cast::<i64>() { return Ok(Value::Number(i.into())); }
+    if let Some(f) = v.clone().try_cast::<f64>() {
+        return serde_json::Number::from_f64(f)
+            .map(Value::Number)
+            .ok_or_else(|| format!("non-finite float: {f}"));
+    }
+    if let Some(s) = v.clone().try_cast::<String>() { return Ok(Value::String(s)); }
+    if let Some(arr) = v.clone().try_cast::<rhai::Array>() {
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr.iter() { out.push(dynamic_to_json_value(item)?); }
+        return Ok(Value::Array(out));
+    }
+    if let Some(map) = v.clone().try_cast::<rhai::Map>() {
+        let mut out = serde_json::Map::with_capacity(map.len());
+        for (k, val) in map.iter() { out.insert(k.to_string(), dynamic_to_json_value(val)?); }
+        return Ok(Value::Object(out));
+    }
+    // Fallback: stringify unknown types (Char, etc).
+    Ok(Value::String(v.to_string()))
+}
+
+fn dyn_to_json(v: &rhai::Dynamic) -> Result<String, String> {
+    let json = dynamic_to_json_value(v)?;
+    serde_json::to_string(&json).map_err(|e| e.to_string())
+}
+
 // ── Per-script execution ─────────────────────────────────────────────────────
 
 /// Outcome of executing a single Rhai script through `execute_script_to_files`.
@@ -261,12 +354,14 @@ pub enum ScriptOutcome {
 
 /// Parse + run `source`, then write `.out`, optionally `.err`, and `.done` atomically.
 /// The `.done` file is the readiness barrier (always written last).
+/// If any print()/debug() output was generated, writes it to `log_path`.
 pub fn execute_script_to_files(
     engine: &Engine,
     source: &str,
     out_path: &std::path::Path,
     err_path: &std::path::Path,
     done_path: &std::path::Path,
+    log_path: &std::path::Path,
     deadline: std::time::Instant,
     host_ctx: &Arc<HostContext>,
 ) -> ScriptOutcome {
@@ -286,6 +381,7 @@ pub fn execute_script_to_files(
         Ok(ast) => ast,
         Err(e) => {
             *host_ctx.current_deadline.lock().unwrap() = None;
+            flush_print_buffer(host_ctx, log_path);
             return write_failure(out_path, err_path, done_path, "parse", &e.to_string());
         }
     };
@@ -297,12 +393,15 @@ pub fn execute_script_to_files(
             Ok(r) => r,
             Err(_payload) => {
                 *host_ctx.current_deadline.lock().unwrap() = None;
+                flush_print_buffer(host_ctx, log_path);
                 return write_failure(out_path, err_path, done_path, "internal",
                                      "internal panic in script evaluation");
             }
         };
     // Disarm deadline before processing result.
     *host_ctx.current_deadline.lock().unwrap() = None;
+    // Flush print buffer regardless of success/failure.
+    flush_print_buffer(host_ctx, log_path);
     match result {
         Ok(v) => {
             let json = match dyn_to_json(&v) {
@@ -320,6 +419,17 @@ pub fn execute_script_to_files(
             let code = classify_error(&e);
             write_failure(out_path, err_path, done_path, code, &format!("{e}"))
         }
+    }
+}
+
+/// Drain the print buffer and write to log_path if non-empty. Always resets the buffer.
+fn flush_print_buffer(host_ctx: &Arc<HostContext>, log_path: &std::path::Path) {
+    let contents = {
+        let mut buf = host_ctx.print_buffer.lock().unwrap();
+        std::mem::take(&mut *buf)
+    };
+    if !contents.is_empty() {
+        let _ = crate::clicom_engine::fs_atomic::write(log_path, contents.as_bytes());
     }
 }
 
@@ -347,17 +457,6 @@ fn write_failure(out: &std::path::Path, err: &std::path::Path, done: &std::path:
     let _ = crate::clicom_engine::fs_atomic::write(err, format!("{code}\n{message}\n").as_bytes());
     let _ = crate::clicom_engine::fs_atomic::write(done, format!("ERR {code}\n").as_bytes());
     ScriptOutcome::Err(code)
-}
-
-fn dyn_to_json(v: &rhai::Dynamic) -> Result<String, String> {
-    if v.is_unit() { return Ok("null".into()); }
-    if let Some(s) = v.clone().try_cast::<String>() {
-        return Ok(serde_json::to_string(&s).map_err(|e| e.to_string())?);
-    }
-    let json: serde_json::Value = serde_json::from_str(&v.to_string())
-        .or_else(|_| Ok::<_, serde_json::Error>(serde_json::Value::String(v.to_string())))
-        .map_err(|e| e.to_string())?;
-    serde_json::to_string(&json).map_err(|e| e.to_string())
 }
 
 pub fn run_script(engine: &Engine, source: &str) -> Result<rhai::Dynamic, rhai::EvalAltResult> {
@@ -439,6 +538,7 @@ mod tests {
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
             script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
             current_deadline: Arc::new(std::sync::Mutex::new(None)),
+            print_buffer: Arc::new(std::sync::Mutex::new(String::new())),
         })
     }
 
@@ -481,11 +581,12 @@ mod tests {
         let out = td.path().join("id.out");
         let err = td.path().join("id.err");
         let done = td.path().join("id.done");
+        let log = td.path().join("id.log");
         let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
         let mut e = build_engine();
         register_host_fns(&mut e, Arc::clone(&ctx));
         let outcome = execute_script_to_files(
-            &e, "1 + 2", &out, &err, &done,
+            &e, "1 + 2", &out, &err, &done, &log,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
             &ctx,
         );
@@ -503,11 +604,12 @@ mod tests {
         let out = td.path().join("id.out");
         let err = td.path().join("id.err");
         let done = td.path().join("id.done");
+        let log = td.path().join("id.log");
         let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
         let mut e = build_engine();
         register_host_fns(&mut e, Arc::clone(&ctx));
         let outcome = execute_script_to_files(
-            &e, "let x: int = \"bad\";", &out, &err, &done,
+            &e, "let x: int = \"bad\";", &out, &err, &done, &log,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
             &ctx,
         );
@@ -529,6 +631,7 @@ mod tests {
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
             script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
             current_deadline: Arc::new(std::sync::Mutex::new(None)),
+            print_buffer: Arc::new(std::sync::Mutex::new(String::new())),
         });
         let _ = ctx; // unused, suppress warning
         let mut e = build_engine();
@@ -544,13 +647,14 @@ mod tests {
         let out = td.path().join("id.out");
         let err = td.path().join("id.err");
         let done = td.path().join("id.done");
+        let log = td.path().join("id.log");
         let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
         let mut e = build_engine();
         register_host_fns(&mut e, Arc::clone(&ctx));
         // Register a host fn that panics.
         e.register_fn("do_panic", || -> () { panic!("deliberate test panic"); });
         let outcome = execute_script_to_files(
-            &e, "do_panic()", &out, &err, &done,
+            &e, "do_panic()", &out, &err, &done, &log,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
             &ctx,
         );
@@ -565,6 +669,7 @@ mod tests {
         let out = td.path().join("id.out");
         let err = td.path().join("id.err");
         let done = td.path().join("id.done");
+        let log = td.path().join("id.log");
         let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
         let mut e = build_engine();
         register_host_fns(&mut e, Arc::clone(&ctx));
@@ -576,7 +681,7 @@ mod tests {
         let outcome = execute_script_to_files(
             &e,
             "set_timeout(500); let i = 0; loop { wait_ms(10); i += 1; if i > 300 { break; } }",
-            &out, &err, &done,
+            &out, &err, &done, &log,
             std::time::Instant::now() + std::time::Duration::from_secs(60),
             &ctx,
         );
@@ -587,5 +692,101 @@ mod tests {
                 "should abort fast, took {:?}", elapsed);
         let done_body = std::fs::read_to_string(&done).unwrap();
         assert!(done_body.starts_with("ERR timeout"), "got: {done_body:?}");
+    }
+
+    // ── New tests: parse_json / to_json / print capture ───────────────────────
+
+    #[test]
+    fn parse_json_object_yields_map() {
+        let mut e = build_engine();
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, r#"parse_json("{\"a\":1,\"b\":[2,3]}")"#).unwrap();
+        assert!(v.clone().try_cast::<rhai::Map>().is_some(), "expected Map, got: {v:?}");
+    }
+
+    #[test]
+    fn to_json_round_trip() {
+        let mut e = build_engine();
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, r#"to_json(parse_json("{\"x\":42}"))"#).unwrap();
+        let s = v.into_string().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed["x"], serde_json::json!(42));
+    }
+
+    #[test]
+    fn to_json_handles_array_and_map_correctly() {
+        let mut e = build_engine();
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, r#"to_json([1,"two",#{three:3}])"#).unwrap();
+        let s = v.into_string().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&s).expect("should be valid JSON");
+        assert!(parsed.is_array());
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr[0], serde_json::json!(1));
+        assert_eq!(arr[1], serde_json::json!("two"));
+        assert_eq!(arr[2]["three"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn parse_json_invalid_throws() {
+        let mut e = build_engine();
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        register_host_fns(&mut e, ctx);
+        let r = run_script(&e, r#"parse_json("not json")"#);
+        assert!(r.is_err(), "expected parse_json to throw on invalid JSON");
+    }
+
+    #[test]
+    fn print_appends_to_buffer() {
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        let mut e = build_engine();
+        register_host_fns(&mut e, Arc::clone(&ctx));
+        let _ = run_script(&e, r#"print("hi"); print("ok")"#).unwrap();
+        let buf = ctx.print_buffer.lock().unwrap().clone();
+        assert_eq!(buf, "hi\nok\n");
+    }
+
+    #[test]
+    fn execute_writes_log_when_print_used() {
+        let td = tempfile::TempDir::new().unwrap();
+        let out = td.path().join("id.out");
+        let err = td.path().join("id.err");
+        let done = td.path().join("id.done");
+        let log = td.path().join("id.log");
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        let mut e = build_engine();
+        register_host_fns(&mut e, Arc::clone(&ctx));
+        let outcome = execute_script_to_files(
+            &e, r#"print("hello from script"); 42"#, &out, &err, &done, &log,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &ctx,
+        );
+        assert!(matches!(outcome, ScriptOutcome::Ok));
+        assert!(log.exists(), "log file should exist");
+        let log_body = std::fs::read_to_string(&log).unwrap();
+        assert!(log_body.contains("hello from script"), "got: {log_body:?}");
+    }
+
+    #[test]
+    fn execute_no_log_when_no_print() {
+        let td = tempfile::TempDir::new().unwrap();
+        let out = td.path().join("id.out");
+        let err = td.path().join("id.err");
+        let done = td.path().join("id.done");
+        let log = td.path().join("id.log");
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        let mut e = build_engine();
+        register_host_fns(&mut e, Arc::clone(&ctx));
+        let outcome = execute_script_to_files(
+            &e, "1 + 1", &out, &err, &done, &log,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            &ctx,
+        );
+        assert!(matches!(outcome, ScriptOutcome::Ok));
+        assert!(!log.exists(), "log file should NOT exist when no print/debug used");
     }
 }

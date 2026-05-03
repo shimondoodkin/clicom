@@ -29,6 +29,9 @@ pub fn err_path(instance: &Path, id: &str) -> PathBuf {
 pub fn done_path(instance: &Path, id: &str) -> PathBuf {
     commands_dir(instance).join(format!("{}.done", id))
 }
+pub fn log_path(instance: &Path, id: &str) -> PathBuf {
+    commands_dir(instance).join(format!("{}.log", id))
+}
 
 /// Substring match of `<partial>` against a dir name like "12345-a3f9c2".
 pub fn partial_matches(dir_name: &str, partial: &str) -> bool {
