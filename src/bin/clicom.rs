@@ -36,6 +36,38 @@ enum Cmd {
         id: Option<String>,
     },
     Help { topic: Option<String> },
+    /// Type text. Default appends Enter (\r). --no-enter to suppress; --raw to disable \n→\r translation.
+    Type {
+        #[arg(long)] partial: Option<String>,
+        #[arg(long)] raw: bool,
+        #[arg(long)] no_enter: bool,
+        text: String,
+    },
+    /// Send a keyboard chord spec like "[Ctrl+C]" or "[Up][Up][Enter]" or "hi[Tab]bye[Enter]".
+    Keys {
+        #[arg(long)] partial: Option<String>,
+        spec: String,
+    },
+    /// Print the wrapped agent's current visible screen.
+    Screen {
+        #[arg(long)] partial: Option<String>,
+    },
+    /// Print everything after the last occurrence of <marker>.
+    ScreenAfter {
+        #[arg(long)] partial: Option<String>,
+        marker: String,
+    },
+    /// Print everything after the last regex match of <pattern>.
+    ScreenAfterRe {
+        #[arg(long)] partial: Option<String>,
+        pattern: String,
+    },
+    /// Wait until the agent has been idle for <ms> ms.
+    WaitIdle {
+        #[arg(long)] partial: Option<String>,
+        #[arg(default_value_t = 800)] ms: u64,
+        #[arg(long)] timeout: Option<u64>,
+    },
 }
 
 fn read_script_source(arg: Option<&str>, file: Option<&str>) -> anyhow::Result<String> {
@@ -77,6 +109,20 @@ fn main() -> anyhow::Result<()> {
         Cmd::Clean { partial, id } =>
             clicom::clicom_cli::cmd_clean::run(&cwd, partial.as_deref(), id.as_deref())?,
         Cmd::Help { topic } => clicom::clicom_cli::cmd_help::run(topic.as_deref()),
+        Cmd::Type { partial, raw, no_enter, text } => {
+            let body = if no_enter || text.ends_with('\n') { text.clone() } else { format!("{}\n", text) };
+            clicom::clicom_cli::quickops::type_text(&cwd, partial.as_deref(), &body, !raw)?
+        }
+        Cmd::Keys { partial, spec } =>
+            clicom::clicom_cli::quickops::type_keys(&cwd, partial.as_deref(), &spec)?,
+        Cmd::Screen { partial } =>
+            clicom::clicom_cli::quickops::screen(&cwd, partial.as_deref())?,
+        Cmd::ScreenAfter { partial, marker } =>
+            clicom::clicom_cli::quickops::screen_after(&cwd, partial.as_deref(), &marker)?,
+        Cmd::ScreenAfterRe { partial, pattern } =>
+            clicom::clicom_cli::quickops::screen_after_re(&cwd, partial.as_deref(), &pattern)?,
+        Cmd::WaitIdle { partial, ms, timeout } =>
+            clicom::clicom_cli::quickops::wait_idle(&cwd, partial.as_deref(), ms, timeout)?,
     };
     std::process::exit(code);
 }

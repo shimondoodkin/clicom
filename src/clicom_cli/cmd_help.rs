@@ -9,13 +9,14 @@ QUICK START
       clicom start -- claude
 
   In another terminal in the same directory (drives the agent):
-      clicom run \"type_text(\\\"hello\\n\\\")\"
-      clicom run \"wait_idle(800); screen_text()\"
-      clicom run \"type_keys(\\\"[Up][Enter]\\\")\"
+      clicom type \"hello\"            # types \"hello\" + Enter
+      clicom wait-idle 800           # wait until the agent is quiet
+      clicom screen                  # print the visible screen
+      clicom keys \"[Up][Enter]\"      # send keyboard shortcuts
 
   Inspect:
       clicom status            # list live + recent instances
-      clicom help              # subcommand reference
+      clicom help              # full subcommand reference
       clicom help host-fns     # all Rhai host functions
       clicom help script       # Rhai language cheatsheet
 ";
@@ -39,12 +40,22 @@ SUBCOMMANDS:
     clean    Delete result triples (.out / .err / .done) from an instance's commands/
     help     Show this help, or `clicom help <topic>` for details
 
+QUICK COMMANDS (no Rhai escaping required):
+    type [--no-enter] [--raw] <text>          Type text (appends Enter by default)
+    keys <spec>                                Send chord like [Ctrl+C], [Up], [F5]
+    screen                                     Print visible screen
+    screen-after <marker>                      Tail after last marker
+    screen-after-re <pattern>                  Tail after last regex match
+    wait-idle [<ms>] [--timeout N]             Wait for agent idle (default 800ms)
+
 TOPICS:
     host-fns   Reference of all Rhai host functions (§4)
     script     Pointers to Rhai language docs and a one-page tutorial
     layout     The .clicom/ on-disk layout (§3)
     start | status | run | queue | clean
         Long-form help for that subcommand
+    type | keys | screen | screen-after | screen-after-re | wait-idle
+        Long-form help for quick commands
 ";
 
 pub fn run(topic: Option<&str>) -> i32 {
@@ -57,7 +68,13 @@ pub fn run(topic: Option<&str>) -> i32 {
         Some("status")   => status_help(),
         Some("run")      => run_help(),
         Some("queue")    => queue_help(),
-        Some("clean")    => clean_help(),
+        Some("clean")          => clean_help(),
+        Some("type")           => type_help(),
+        Some("keys")           => keys_help(),
+        Some("screen")         => screen_help(),
+        Some("screen-after")   => screen_after_help(),
+        Some("screen-after-re") => screen_after_re_help(),
+        Some("wait-idle")      => wait_idle_help(),
         Some(other) => {
             eprintln!("clicom help: unknown topic '{other}'");
             return 2;
@@ -130,3 +147,71 @@ fn status_help() -> String { "clicom status [<partial>]\n".into() }
 fn run_help()    -> String { "clicom run [<partial>] (<inline> | -f <file> | -) [--wait | --force] [--timeout <ms>]\n".into() }
 fn queue_help()  -> String { "clicom queue [<partial>] (<inline> | -f <file> | -)\n".into() }
 fn clean_help()  -> String { "clicom clean [<partial>] [<id>]\n".into() }
+
+fn type_help() -> String {
+    "clicom type [--partial <p>] [--no-enter] [--raw] <text>\n\
+     \n\
+     Type text into the wrapped agent. By default appends Enter (\\n → \\r translated).\n\
+     \n\
+     FLAGS:\n\
+       --no-enter    Do not append a newline after <text>\n\
+       --raw         Disable \\n → \\r translation (pass newline bytes literally)\n\
+       --partial <p> Match only the instance whose name/id contains <p>\n\
+     \n\
+     EXAMPLES:\n\
+       clicom type \"hello\"              # sends \"hello\\r\" (Enter)\n\
+       clicom type --no-enter \"hello\"   # sends \"hello\" without Enter\n\
+       clicom type --raw \"line1\\nline2\" # sends with literal \\n\n".into()
+}
+
+fn keys_help() -> String {
+    "clicom keys [--partial <p>] <spec>\n\
+     \n\
+     Send a keyboard chord specification to the wrapped agent.\n\
+     Plain text outside brackets is typed literally; bracketed tokens are special keys.\n\
+     \n\
+     EXAMPLES:\n\
+       clicom keys \"[Ctrl+C]\"           # send Ctrl+C\n\
+       clicom keys \"[Up][Up][Enter]\"    # two Up arrows then Enter\n\
+       clicom keys \"hi[Tab]bye[Enter]\"  # type \"hi\", Tab, \"bye\", Enter\n\
+       clicom keys \"[F5]\"              # function key F5\n".into()
+}
+
+fn screen_help() -> String {
+    "clicom screen [--partial <p>]\n\
+     \n\
+     Print the wrapped agent's current visible screen text to stdout.\n".into()
+}
+
+fn screen_after_help() -> String {
+    "clicom screen-after [--partial <p>] <marker>\n\
+     \n\
+     Print everything after the last occurrence of <marker> in the agent's scrollback.\n\
+     Useful for extracting output after a known prompt or separator.\n\
+     \n\
+     EXAMPLE:\n\
+       clicom screen-after \">>>\"   # print everything after the last \">>>\"\n".into()
+}
+
+fn screen_after_re_help() -> String {
+    "clicom screen-after-re [--partial <p>] <pattern>\n\
+     \n\
+     Print everything after the last regex match of <pattern> in the agent's scrollback.\n\
+     \n\
+     EXAMPLE:\n\
+       clicom screen-after-re \"\\\\$\\\\s\"   # print everything after the last shell prompt\n".into()
+}
+
+fn wait_idle_help() -> String {
+    "clicom wait-idle [--partial <p>] [<ms>] [--timeout <N>]\n\
+     \n\
+     Wait until the wrapped agent has been idle (no output) for <ms> milliseconds.\n\
+     Defaults to 800ms idle threshold, 60000ms (60s) timeout.\n\
+     \n\
+     ARGS:\n\
+       <ms>          Idle silence threshold in milliseconds (default: 800)\n\
+       --timeout <N> Maximum time to wait in milliseconds (default: 60000)\n\
+     \n\
+     EXAMPLE:\n\
+       clicom wait-idle 1000 --timeout 30000   # wait up to 30s for 1s of silence\n".into()
+}
