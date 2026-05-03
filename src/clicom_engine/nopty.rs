@@ -1,7 +1,6 @@
 //! Pipe-based spawn (no PTY). Wires child stdin/stdout/stderr to plain pipes;
 //! host stdin → child stdin, child stdout → host stdout. Used by `clicom start --nopty`.
 
-use std::io::Read;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 pub struct NoPtyChild {
@@ -26,6 +25,7 @@ pub fn spawn(command: &[String]) -> anyhow::Result<NoPtyChild> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[cfg(windows)]
     fn echo_cmd() -> Vec<String> {

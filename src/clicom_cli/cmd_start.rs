@@ -100,7 +100,7 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
     let ctx = std::sync::Arc::new(rhai_host::HostContext {
         screen: Arc::clone(&screen),
         nudge_tx: nudge_tx.clone(),
-        instance_cwd: ch.instance_dir.clone(),
+        instance_cwd: cwd.to_path_buf(),
         idle_observer: Arc::clone(&detector),
         script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
     });

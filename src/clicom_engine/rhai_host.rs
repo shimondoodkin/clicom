@@ -9,6 +9,7 @@ use crate::clicom_engine::screen::ScreenBuffer;
 pub struct HostContext {
     pub screen: Arc<ScreenBuffer>,
     pub nudge_tx: crossbeam_channel::Sender<Vec<u8>>,
+    /// The wrapper's process cwd (per spec §4 — used to resolve relative paths in host fns).
     pub instance_cwd: std::path::PathBuf,
     pub idle_observer: Arc<std::sync::Mutex<crate::clicom_engine::idle::IdleDetector>>,
     pub script_timeout_override: Arc<std::sync::Mutex<Option<u64>>>,
