@@ -38,6 +38,7 @@ SUBCOMMANDS:
     run      Drop a Rhai script into the queue and wait for the result
     queue    Drop a Rhai script and exit immediately (asynchronous)
     clean    Delete result triples (.out / .err / .done) from an instance's commands/
+    mcp      Start a stdio MCP server (use from Claude Code / other MCP clients)
     help     Show this help, or `clicom help <topic>` for details
 
 QUICK COMMANDS (no Rhai escaping required):
@@ -52,7 +53,7 @@ TOPICS:
     host-fns   Reference of all Rhai host functions (§4)
     script     Pointers to Rhai language docs and a one-page tutorial
     layout     The .clicom/ on-disk layout (§3)
-    start | status | run | queue | clean
+    start | status | run | queue | clean | mcp
         Long-form help for that subcommand
     type | keys | screen | screen-after | screen-after-re | wait-idle
         Long-form help for quick commands
@@ -75,6 +76,7 @@ pub fn run(topic: Option<&str>) -> i32 {
         Some("screen-after")   => screen_after_help(),
         Some("screen-after-re") => screen_after_re_help(),
         Some("wait-idle")      => wait_idle_help(),
+        Some("mcp")            => mcp_help(),
         Some(other) => {
             eprintln!("clicom help: unknown topic '{other}'");
             return 2;
@@ -214,4 +216,18 @@ fn wait_idle_help() -> String {
      \n\
      EXAMPLE:\n\
        clicom wait-idle 1000 --timeout 30000   # wait up to 30s for 1s of silence\n".into()
+}
+
+fn mcp_help() -> String {
+    "clicom mcp\n\
+     \n\
+     Starts a stdio MCP (Model Context Protocol) server. Configure your MCP client\n\
+     (e.g. Claude Code) to launch this binary in your project directory; the server\n\
+     exposes clicom's driver operations as MCP tools so the model can drive wrapped\n\
+     agents directly via tool calls (no shell escaping).\n\
+     \n\
+     Tools exposed:\n\
+       clicom_status, clicom_type, clicom_keys, clicom_screen,\n\
+       clicom_screen_after, clicom_screen_after_re, clicom_wait_idle,\n\
+       clicom_run, clicom_queue, clicom_clean\n".into()
 }

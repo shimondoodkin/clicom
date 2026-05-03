@@ -68,6 +68,8 @@ enum Cmd {
         #[arg(default_value_t = 800)] ms: u64,
         #[arg(long)] timeout: Option<u64>,
     },
+    /// Start a stdio MCP server exposing clicom's driver ops as tools.
+    Mcp,
 }
 
 fn read_script_source(arg: Option<&str>, file: Option<&str>) -> anyhow::Result<String> {
@@ -123,6 +125,7 @@ fn main() -> anyhow::Result<()> {
             clicom::clicom_cli::quickops::screen_after_re(&cwd, partial.as_deref(), &pattern)?,
         Cmd::WaitIdle { partial, ms, timeout } =>
             clicom::clicom_cli::quickops::wait_idle(&cwd, partial.as_deref(), ms, timeout)?,
+        Cmd::Mcp => clicom::clicom_cli::cmd_mcp::run(&cwd)?,
     };
     std::process::exit(code);
 }
