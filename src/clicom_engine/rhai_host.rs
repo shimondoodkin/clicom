@@ -50,11 +50,62 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
             .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("fs: {e}").into(), rhai::Position::NONE)))?;
         Ok(body.as_bytes().len() as i64)
     });
+
+    // screen_tail_text
+    let c = Arc::clone(&ctx);
+    engine.register_fn("screen_tail_text", move |from: i64, to: i64| -> Result<String, Box<rhai::EvalAltResult>> {
+        let (a, b) = resolve_indexes(&c.screen, from, to)?;
+        let r = c.screen.read_range(a, b);
+        Ok(r.lines.join("\n"))
+    });
+
+    // screen_tail_save
+    let c = Arc::clone(&ctx);
+    engine.register_fn("screen_tail_save", move |path: &str, from: i64, to: i64| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
+        let (a, b) = resolve_indexes(&c.screen, from, to)?;
+        let r = c.screen.read_range(a, b);
+        let header = format!("# requested: {from}..{to}  actual: {}..{}  total_lifetime: {}  trimmed_below: {}\n",
+                             r.actual_from, r.actual_to, r.total_lifetime, r.trimmed_below);
+        let body = format!("{}{}", header, r.lines.join("\n"));
+        let resolved = resolve_path(&c.instance_cwd, path);
+        crate::clicom_engine::fs_atomic::write(&resolved, body.as_bytes())
+            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("fs: {e}").into(), rhai::Position::NONE)))?;
+        let mut m = rhai::Map::new();
+        m.insert("actual_from".into(), (r.actual_from as i64).into());
+        m.insert("actual_to".into(),   (r.actual_to as i64).into());
+        m.insert("total_lifetime".into(), (r.total_lifetime as i64).into());
+        m.insert("trimmed_below".into(),  (r.trimmed_below as i64).into());
+        m.insert("bytes".into(),       (body.as_bytes().len() as i64).into());
+        Ok(m)
+    });
 }
 
 fn resolve_path(cwd: &std::path::Path, p: &str) -> std::path::PathBuf {
     let pp = std::path::Path::new(p);
     if pp.is_absolute() { pp.to_path_buf() } else { cwd.join(pp) }
+}
+
+fn resolve_indexes(buf: &ScreenBuffer, from: i64, to: i64) -> Result<(u64, u64), Box<rhai::EvalAltResult>> {
+    // Reject obviously inverted ranges before clamping.
+    if from > to {
+        return Err(Box::new(rhai::EvalAltResult::ErrorRuntime("bad range".into(), rhai::Position::NONE)));
+    }
+    let (total, _trim) = buf.lifetime_info();
+    let resolve = |x: i64| -> u64 {
+        if x >= 0 { (x as u64).min(total) } else {
+            let off = (-x) as u64;
+            if off > total { 0 } else { total - off }
+        }
+    };
+    let a = resolve(from);
+    let b = resolve(to);
+    if a > b {
+        return Err(Box::new(rhai::EvalAltResult::ErrorRuntime("bad range".into(), rhai::Position::NONE)));
+    }
+    if buf.range_wholly_trimmed(a, b) {
+        return Err(Box::new(rhai::EvalAltResult::ErrorRuntime("requested below trim watermark".into(), rhai::Position::NONE)));
+    }
+    Ok((a, b))
 }
 
 pub fn run_script(engine: &Engine, source: &str) -> Result<rhai::Dynamic, rhai::EvalAltResult> {
@@ -79,6 +130,37 @@ mod tests {
         let e = build_engine();
         let r = run_script(&e, "eval(\"1+1\")");
         assert!(r.is_err(), "expected eval to be disabled");
+    }
+
+    fn make_ctx(screen: Arc<ScreenBuffer>) -> Arc<HostContext> {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        Arc::new(HostContext {
+            screen,
+            nudge_tx: tx,
+            instance_cwd: std::env::temp_dir(),
+            idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
+        })
+    }
+
+    #[test]
+    fn screen_tail_text_negative_index() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        for i in 0..3 { screen.advance_bytes(format!("L{i}\n").as_bytes()); }
+        let ctx = make_ctx(Arc::clone(&screen));
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, "screen_tail_text(-3, -1)").unwrap();
+        let s = v.into_string().unwrap();
+        assert!(s.lines().count() <= 3);
+    }
+
+    #[test]
+    fn screen_tail_text_bad_range_throws() {
+        let ctx = make_ctx(Arc::new(ScreenBuffer::new(5, 80)));
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let r = run_script(&e, "screen_tail_text(10, 5)");
+        assert!(r.is_err());
     }
 
     #[test]
