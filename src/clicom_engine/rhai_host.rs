@@ -11,6 +11,7 @@ pub struct HostContext {
     pub nudge_tx: crossbeam_channel::Sender<Vec<u8>>,
     pub instance_cwd: std::path::PathBuf,
     pub idle_observer: Arc<std::sync::Mutex<crate::clicom_engine::idle::IdleDetector>>,
+    pub script_timeout_override: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 pub fn build_engine() -> Engine {
@@ -106,6 +107,54 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
         Ok(r.lines.join("\n"))
     });
 
+    // wait_ms
+    let _c = Arc::clone(&ctx);
+    engine.register_fn("wait_ms", move |ms: i64| -> Result<(), Box<rhai::EvalAltResult>> {
+        if ms > 600_000 {
+            return Err(Box::new(rhai::EvalAltResult::ErrorRuntime("wait_ms: cap exceeded".into(), rhai::Position::NONE)));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(ms.max(0) as u64));
+        Ok(())
+    });
+
+    // wait_idle (1-arg) — default timeout 60_000
+    let c = Arc::clone(&ctx);
+    engine.register_fn("wait_idle", move |ms: i64| -> Result<(), Box<rhai::EvalAltResult>> {
+        wait_idle_impl(&c, ms, 60_000)
+    });
+
+    // wait_idle (2-arg)
+    let c = Arc::clone(&ctx);
+    engine.register_fn("wait_idle", move |ms: i64, timeout_ms: i64| -> Result<(), Box<rhai::EvalAltResult>> {
+        wait_idle_impl(&c, ms, timeout_ms)
+    });
+
+    // status
+    let c = Arc::clone(&ctx);
+    engine.register_fn("status", move || -> rhai::Map {
+        let mut m = rhai::Map::new();
+        let st = c.idle_observer.lock().map(|d| d.state()).unwrap_or(crate::clicom_engine::idle::IdleState::Busy);
+        m.insert("state".into(), format!("{:?}", st).to_lowercase().into());
+        m.insert("last_activity".into(), chrono::Utc::now().to_rfc3339().into());
+        let (lt, tb) = c.screen.lifetime_info();
+        m.insert("lifetime_lines".into(), (lt as i64).into());
+        m.insert("trimmed_below".into(), (tb as i64).into());
+        let (rows, cols) = c.screen.visible_dims();
+        m.insert("visible_rows".into(), (rows as i64).into());
+        m.insert("visible_cols".into(), (cols as i64).into());
+        m
+    });
+
+    // set_timeout
+    let c = Arc::clone(&ctx);
+    engine.register_fn("set_timeout", move |ms: i64| -> Result<(), Box<rhai::EvalAltResult>> {
+        if ms > 3_600_000 {
+            return Err(Box::new(rhai::EvalAltResult::ErrorRuntime("set_timeout: cap exceeded".into(), rhai::Position::NONE)));
+        }
+        *c.script_timeout_override.lock().unwrap() = Some(ms.max(0) as u64);
+        Ok(())
+    });
+
     // screen_tail_save
     let c = Arc::clone(&ctx);
     engine.register_fn("screen_tail_save", move |path: &str, from: i64, to: i64| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
@@ -130,6 +179,28 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
 fn resolve_path(cwd: &std::path::Path, p: &str) -> std::path::PathBuf {
     let pp = std::path::Path::new(p);
     if pp.is_absolute() { pp.to_path_buf() } else { cwd.join(pp) }
+}
+
+fn wait_idle_impl(ctx: &HostContext, ms: i64, timeout_ms: i64) -> Result<(), Box<rhai::EvalAltResult>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(0) as u64);
+    let needed = std::time::Duration::from_millis(ms.max(0) as u64);
+    let mut idle_since: Option<std::time::Instant> = None;
+    loop {
+        let now = std::time::Instant::now();
+        let st = ctx.idle_observer.lock().map(|d| d.state()).unwrap_or(crate::clicom_engine::idle::IdleState::Busy);
+        match st {
+            crate::clicom_engine::idle::IdleState::Idle => {
+                let s = idle_since.get_or_insert(now);
+                if now.duration_since(*s) >= needed { return Ok(()); }
+            }
+            crate::clicom_engine::idle::IdleState::Busy => { idle_since = None; }
+        }
+        if now >= deadline {
+            return Err(Box::new(rhai::EvalAltResult::ErrorRuntime(
+                format!("wait_idle: timeout after {timeout_ms}ms").into(), rhai::Position::NONE)));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 fn resolve_indexes(buf: &ScreenBuffer, from: i64, to: i64) -> Result<(u64, u64), Box<rhai::EvalAltResult>> {
@@ -180,6 +251,22 @@ mod tests {
     }
 
     #[test]
+    fn wait_ms_above_cap_throws() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        let mut e = build_engine();
+        register_host_fns(&mut e, make_ctx(Arc::clone(&screen)));
+        assert!(run_script(&e, "wait_ms(700000)").is_err());
+    }
+
+    #[test]
+    fn set_timeout_above_cap_throws() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        let mut e = build_engine();
+        register_host_fns(&mut e, make_ctx(Arc::clone(&screen)));
+        assert!(run_script(&e, "set_timeout(7200000)").is_err());
+    }
+
+    #[test]
     fn last_after_literal_returns_post_marker_tail() {
         let screen = Arc::new(ScreenBuffer::new(20, 80));
         screen.advance_bytes(b"prelude marker tail\n");
@@ -216,6 +303,7 @@ mod tests {
             nudge_tx: tx,
             instance_cwd: std::env::temp_dir(),
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
+            script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -250,6 +338,7 @@ mod tests {
             nudge_tx: tx,
             instance_cwd: std::env::temp_dir(),
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
+            script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
         });
         let mut e = build_engine();
         register_host_fns(&mut e, ctx);
@@ -266,6 +355,7 @@ mod tests {
             nudge_tx: tx,
             instance_cwd: std::env::temp_dir(),
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
+            script_timeout_override: Arc::new(std::sync::Mutex::new(None)),
         });
         let mut e = build_engine();
         register_host_fns(&mut e, ctx);
