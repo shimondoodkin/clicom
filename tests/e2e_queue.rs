@@ -81,6 +81,9 @@ fn result_triple_cap_evicts_oldest() {
         if Instant::now() > deadline { panic!("scripts did not finish"); }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // The watcher runs evict_result_triples immediately after writing .done.
+    // Give the watcher thread a moment to complete the eviction call before counting.
+    std::thread::sleep(Duration::from_millis(200));
     // After eviction, only the 10 newest should remain
     let dones: Vec<_> = std::fs::read_dir(&cmds).unwrap()
         .filter_map(|e| e.ok())
