@@ -10,3 +10,4 @@ pub mod nudge;
 pub mod pty;
 pub mod mouse_filter;
 pub mod forwarding;
+pub mod nopty;
