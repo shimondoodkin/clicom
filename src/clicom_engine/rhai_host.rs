@@ -226,6 +226,89 @@ fn resolve_indexes(buf: &ScreenBuffer, from: i64, to: i64) -> Result<(u64, u64),
     Ok((a, b))
 }
 
+// ── Per-script execution ─────────────────────────────────────────────────────
+
+/// Outcome of executing a single Rhai script through `execute_script_to_files`.
+pub enum ScriptOutcome {
+    Ok,
+    /// Short code: "parse" | "runtime" | "timeout" | "host_fn" | "fs" | "range" | "internal"
+    Err(&'static str),
+}
+
+/// Parse + run `source`, then write `.out`, optionally `.err`, and `.done` atomically.
+/// The `.done` file is the readiness barrier (always written last).
+pub fn execute_script_to_files(
+    engine: &Engine,
+    source: &str,
+    out_path: &std::path::Path,
+    err_path: &std::path::Path,
+    done_path: &std::path::Path,
+    deadline: std::time::Instant,
+) -> ScriptOutcome {
+    let ast = match engine.compile(source) {
+        Ok(ast) => ast,
+        Err(e) => return write_failure(out_path, err_path, done_path, "parse", &e.to_string()),
+    };
+    let mut scope = rhai::Scope::new();
+    let result: Result<rhai::Dynamic, Box<rhai::EvalAltResult>> =
+        engine.eval_ast_with_scope(&mut scope, &ast);
+    let _ = deadline; // wall-clock enforcement is a follow-up; max_operations caps it for now
+    match result {
+        Ok(v) => {
+            let json = match dyn_to_json(&v) {
+                Ok(j) => j,
+                Err(e) => return write_failure(out_path, err_path, done_path, "internal",
+                                               &format!("json encode: {e}")),
+            };
+            if let Err(e) = crate::clicom_engine::fs_atomic::write(out_path, json.as_bytes()) {
+                return write_failure(out_path, err_path, done_path, "fs", &format!("{e}"));
+            }
+            let _ = crate::clicom_engine::fs_atomic::write(done_path, b"OK\n");
+            ScriptOutcome::Ok
+        }
+        Err(e) => {
+            let code = classify_error(&e);
+            write_failure(out_path, err_path, done_path, code, &format!("{e}"))
+        }
+    }
+}
+
+fn classify_error(e: &rhai::EvalAltResult) -> &'static str {
+    use rhai::EvalAltResult::*;
+    match e {
+        ErrorParsing(_, _) => "parse",
+        ErrorRuntime(msg, _) => {
+            let s = msg.to_string();
+            if s.contains("timeout") { "host_fn" }
+            else if s.contains("requested below trim watermark") { "range" }
+            else if s.starts_with("fs:") { "fs" }
+            else if s.contains("cap exceeded") || s.contains("type_text:") { "host_fn" }
+            else { "runtime" }
+        }
+        ErrorTooManyOperations(_) => "runtime",
+        _ => "runtime",
+    }
+}
+
+fn write_failure(out: &std::path::Path, err: &std::path::Path, done: &std::path::Path,
+                 code: &'static str, message: &str) -> ScriptOutcome {
+    let _ = crate::clicom_engine::fs_atomic::write(out, b"null\n");
+    let _ = crate::clicom_engine::fs_atomic::write(err, format!("{code}\n{message}\n").as_bytes());
+    let _ = crate::clicom_engine::fs_atomic::write(done, format!("ERR {code}\n").as_bytes());
+    ScriptOutcome::Err(code)
+}
+
+fn dyn_to_json(v: &rhai::Dynamic) -> Result<String, String> {
+    if v.is_unit() { return Ok("null".into()); }
+    if let Some(s) = v.clone().try_cast::<String>() {
+        return Ok(serde_json::to_string(&s).map_err(|e| e.to_string())?);
+    }
+    let json: serde_json::Value = serde_json::from_str(&v.to_string())
+        .or_else(|_| Ok::<_, serde_json::Error>(serde_json::Value::String(v.to_string())))
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&json).map_err(|e| e.to_string())
+}
+
 pub fn run_script(engine: &Engine, source: &str) -> Result<rhai::Dynamic, rhai::EvalAltResult> {
     let ast = engine.compile(source).map_err(|e| *Box::new(rhai::EvalAltResult::ErrorParsing(*e.0, e.1)))?;
     let mut scope = Scope::new();
@@ -345,6 +428,43 @@ mod tests {
         let v = run_script(&e, "screen_text()").unwrap();
         let s = v.into_string().unwrap();
         assert!(s.contains("hello"), "got: {s:?}");
+    }
+
+    #[test]
+    fn execute_writes_done_after_out() {
+        let td = tempfile::TempDir::new().unwrap();
+        let out = td.path().join("id.out");
+        let err = td.path().join("id.err");
+        let done = td.path().join("id.done");
+        let mut e = build_engine();
+        register_host_fns(&mut e, make_ctx(Arc::new(ScreenBuffer::new(5, 80))));
+        let outcome = execute_script_to_files(
+            &e, "1 + 2", &out, &err, &done,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        assert!(matches!(outcome, ScriptOutcome::Ok));
+        let out_body = std::fs::read_to_string(&out).unwrap();
+        let done_body = std::fs::read_to_string(&done).unwrap();
+        assert!(out_body.trim().contains("3"));
+        assert!(done_body.trim_end() == "OK");
+        assert!(!err.exists());
+    }
+
+    #[test]
+    fn execute_failure_writes_err_and_done_err() {
+        let td = tempfile::TempDir::new().unwrap();
+        let out = td.path().join("id.out");
+        let err = td.path().join("id.err");
+        let done = td.path().join("id.done");
+        let mut e = build_engine();
+        register_host_fns(&mut e, make_ctx(Arc::new(ScreenBuffer::new(5, 80))));
+        let outcome = execute_script_to_files(
+            &e, "let x: int = \"bad\";", &out, &err, &done,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        assert!(matches!(outcome, ScriptOutcome::Err(_)));
+        assert!(std::fs::read_to_string(&done).unwrap().starts_with("ERR "));
+        assert!(std::fs::read_to_string(&err).unwrap().lines().next().is_some());
     }
 
     #[test]
