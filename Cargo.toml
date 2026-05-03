@@ -12,6 +12,12 @@ path = "src/lib.rs"
 name = "clicom"
 path = "src/bin/clicom.rs"
 
+[[bin]]
+name = "fake_agent"
+path = "tests/fixtures/fake_agent.rs"
+test = false
+bench = false
+
 [dependencies]
 anyhow = "1"
 thiserror = "1"
