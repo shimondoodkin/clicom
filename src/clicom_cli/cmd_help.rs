@@ -93,7 +93,12 @@ fn host_fns_help() -> String {
        print(...)   // built-in\n\
        debug(...)   // built-in\n".into()
 }
-fn script_help() -> String { "See https://rhai.rs/book/ for the language reference.\n".into() }
+fn script_help() -> String {
+    let mut s = String::from(include_str!("../../docs/help-script.txt"));
+    if !s.ends_with('\n') { s.push('\n'); }
+    s.push_str("\nFull language reference: https://rhai.rs/book/\n");
+    s
+}
 fn layout_help() -> String { "Layout under <cwd>/.clicom/<pid>-<rand6>/:\n  meta.json status.json screen.txt commands.lock commands/<id>.{rhai,out,err,done}\n".into() }
 fn start_help()  -> String { "clicom start [--mouse] [--nopty] [--name <name>] -- <command> [args...]\n".into() }
 fn status_help() -> String { "clicom status [<partial>]\n".into() }

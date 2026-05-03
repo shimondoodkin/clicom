@@ -1,0 +1,154 @@
+RHAI QUICK REFERENCE
+====================
+
+Embedded scripting language for Rust. Dynamic types, sandboxed.
+
+VARIABLES & TYPES
+-----------------
+  let x = 42;          int (i64)
+  let y = 3.14;        float (f64)
+  let s = "hi";        string
+  let b = true;        bool
+  let c = 'A';         char
+  let n = ();          unit
+  const PI = 3.14;     constant
+  type_of(x)           returns "i64"
+
+STRINGS
+-------
+  let g = `hi, ${name}!`;     template literal
+  s.len  s.is_empty           length / empty check
+  s + "!"                     concatenate
+  s.contains("lo")            substring test
+  s.to_upper()  s.to_lower()
+  s.split(",")  s.trim()
+  s[0]                        char at index
+  s[1..3]                     substring slice
+
+ARRAYS
+------
+  let a = [1, 2, 3];
+  a.push(4);  a.pop();
+  a.len  a[0]  a[-1]          (-1 = last)
+  a.map(|x| x * 2)
+  a.filter(|x| x > 1)
+  a.reduce(|sum, x| sum + x)
+  a.sort()  a.reverse()
+
+OBJECT MAPS
+-----------
+  let m = #{ name: "Ada", age: 36 };
+  m.name        or  m["name"]
+  m.role = "dev";              add field
+  m.keys()  m.values()
+  m.contains("name")
+
+OPERATORS
+---------
+  +  -  *  /  %  **            arithmetic
+  == != <  >  <= >=            compare
+  &&  ||  !                    logical
+  &  |  ^  <<  >>              bitwise
+  in                           e.g. x in arr
+  ..   ..=                     ranges (excl/incl)
+
+CONTROL FLOW
+------------
+  if x > 0 { ... } else if ... { ... } else { ... }
+
+  while cond { ... }
+  loop { if done { break; } }
+  for i in 0..10 { ... }
+  for (v, i) in arr { ... }    value, index
+  for (v, k) in map { ... }    value, key
+
+  // if is an expression
+  let label = if x > 0 { "pos" } else { "neg" };
+
+FUNCTIONS
+---------
+  fn add(a, b) { a + b }       last expr returns
+
+  fn greet(name) {
+      if name == "" { return "?"; }
+      `hi, ${name}`
+  }
+
+  // method-style call (any fn)
+  fn double(x) { x * 2 }
+  let y = 5.double();          same as double(5)
+
+CLOSURES
+--------
+  let inc = |x| x + 1;
+  let add = |a, b| { a + b };
+
+  let n = 10;
+  let f = |x| x + n;           captures n
+
+SWITCH
+------
+  switch x {
+      1 => "one",
+      2 | 3 => "small",
+      4..10 => "mid",
+      n if n > 100 => "big",
+      _ => "other"
+  }
+
+ERRORS
+------
+  throw "bad input";
+  throw #{ code: 400, msg: "x" };
+
+  try {
+      risky();
+  } catch (err) {
+      print(err);
+  }
+
+MODULES
+-------
+  import "math" as m;
+  m::sqrt(9.0)
+
+  export const VERSION = "1.0";
+  export fn pub_fn() { ... }
+  private fn helper() { ... }
+
+RUST HOST INTEGRATION
+---------------------
+  use rhai::{Engine, Scope};
+
+  let engine = Engine::new();
+  let n: i64 = engine.eval("40 + 2")?;
+
+  // register a Rust function
+  engine.register_fn("shout", |s: &str| s.to_uppercase());
+
+  // register a custom type
+  #[derive(Clone)]
+  struct Pt { x: i64, y: i64 }
+  engine.register_type::<Pt>()
+        .register_fn("new_pt", |x, y| Pt { x, y })
+        .register_get("x", |p: &mut Pt| p.x);
+
+  // inject variables via Scope
+  let mut scope = Scope::new();
+  scope.push("user", "ada");
+
+  // compile once, run many
+  let ast = engine.compile("x * 2")?;
+  let r: i64 = engine.eval_ast_with_scope(&mut scope, &ast)?;
+
+SANDBOX LIMITS
+--------------
+  engine.set_max_operations(10_000);
+  engine.set_max_call_levels(20);
+  engine.set_max_expr_depths(32, 32);
+  engine.set_max_string_size(2048);
+  engine.set_max_array_size(1000);
+
+----
+Cargo:  rhai = "1"
+Docs:   https://rhai.rs
