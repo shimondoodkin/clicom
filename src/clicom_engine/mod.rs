@@ -8,3 +8,5 @@ pub mod screen;
 pub mod idle;
 pub mod nudge;
 pub mod pty;
+pub mod mouse_filter;
+pub mod forwarding;
