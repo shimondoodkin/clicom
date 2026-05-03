@@ -10,7 +10,13 @@ use std::time::{Duration, Instant};
 use crate::clicom_engine::{layout, retention, rhai_host};
 
 pub struct WatcherHandle {
-    pub _stop: Arc<std::sync::atomic::AtomicBool>,
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for WatcherHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 pub fn spawn_watcher(
@@ -79,5 +85,5 @@ pub fn spawn_watcher(
         }
     });
 
-    Ok(WatcherHandle { _stop: stop })
+    Ok(WatcherHandle { stop })
 }
