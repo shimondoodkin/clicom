@@ -43,3 +43,22 @@ fn loop_caught_by_max_operations() {
     assert_eq!(out.status.code(), Some(3));
     let _ = child.kill(); let _ = child.wait();
 }
+
+#[test]
+fn set_timeout_overrides_default() {
+    let td = TempDir::new().unwrap();
+    let mut child = start_wrapper(&td);
+    let start = std::time::Instant::now();
+    // Script: set short timeout then spin in a loop. Should abort with ERR timeout.
+    let out = Command::cargo_bin("clicom").unwrap()
+        .current_dir(td.path())
+        .args(["run", "", "set_timeout(500); let i = 0; loop { wait_ms(10); i += 1; if i > 300 { break; } }"])
+        .output().unwrap();
+    let elapsed = start.elapsed();
+    // Should exit 3 (script error) and complete well within 2s.
+    assert_eq!(out.status.code(), Some(3), "expected exit 3, got {:?}", out.status.code());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with("timeout"), "expected ERR timeout in stderr, got: {stderr:?}");
+    assert!(elapsed < Duration::from_secs(2), "should abort fast, took {:?}", elapsed);
+    let _ = child.kill(); let _ = child.wait();
+}
