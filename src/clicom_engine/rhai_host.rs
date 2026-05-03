@@ -28,6 +28,16 @@ fn env_or_default(name: &str, def: usize) -> usize {
     std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(def)
 }
 
+pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
+    // type_text
+    let c = Arc::clone(&ctx);
+    engine.register_fn("type_text", move |s: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+        c.nudge_tx.send(s.as_bytes().to_vec())
+            .map_err(|_| Box::new(rhai::EvalAltResult::ErrorRuntime("type_text: channel closed".into(), rhai::Position::NONE)))?;
+        Ok(())
+    });
+}
+
 pub fn run_script(engine: &Engine, source: &str) -> Result<rhai::Dynamic, rhai::EvalAltResult> {
     let ast = engine.compile(source).map_err(|e| *Box::new(rhai::EvalAltResult::ErrorParsing(*e.0, e.1)))?;
     let mut scope = Scope::new();
@@ -50,5 +60,21 @@ mod tests {
         let e = build_engine();
         let r = run_script(&e, "eval(\"1+1\")");
         assert!(r.is_err(), "expected eval to be disabled");
+    }
+
+    #[test]
+    fn type_text_pushes_into_channel() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let ctx = Arc::new(HostContext {
+            screen: Arc::new(ScreenBuffer::new(10, 80)),
+            nudge_tx: tx,
+            instance_cwd: std::env::temp_dir(),
+            idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
+        });
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let _ = run_script(&e, "type_text(\"hi\\n\")").unwrap();
+        let bytes = rx.recv().unwrap();
+        assert_eq!(bytes, b"hi\n");
     }
 }
