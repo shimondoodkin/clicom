@@ -255,8 +255,16 @@ pub fn execute_script_to_files(
     };
     let mut scope = rhai::Scope::new();
     let result: Result<rhai::Dynamic, Box<rhai::EvalAltResult>> =
-        engine.eval_ast_with_scope(&mut scope, &ast);
-    let _ = deadline; // wall-clock enforcement is a follow-up; max_operations caps it for now
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.eval_ast_with_scope(&mut scope, &ast)
+        })) {
+            Ok(r) => r,
+            Err(_payload) => {
+                return write_failure(out_path, err_path, done_path, "internal",
+                                     "internal panic in script evaluation");
+            }
+        };
+    let _ = deadline; // wall-clock enforcement handled by on_progress; max_operations also caps
     match result {
         Ok(v) => {
             let json = match dyn_to_json(&v) {
@@ -486,5 +494,24 @@ mod tests {
         let _ = run_script(&e, "type_text(\"hi\\n\")").unwrap();
         let bytes = rx.recv().unwrap();
         assert_eq!(bytes, b"hi\n");
+    }
+
+    #[test]
+    fn panic_in_host_fn_yields_internal() {
+        let td = tempfile::TempDir::new().unwrap();
+        let out = td.path().join("id.out");
+        let err = td.path().join("id.err");
+        let done = td.path().join("id.done");
+        let mut e = build_engine();
+        register_host_fns(&mut e, make_ctx(Arc::new(ScreenBuffer::new(5, 80))));
+        // Register a host fn that panics.
+        e.register_fn("do_panic", || -> () { panic!("deliberate test panic"); });
+        let outcome = execute_script_to_files(
+            &e, "do_panic()", &out, &err, &done,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        assert!(matches!(outcome, ScriptOutcome::Err("internal")));
+        let done_body = std::fs::read_to_string(&done).unwrap();
+        assert!(done_body.starts_with("ERR internal"), "got: {done_body:?}");
     }
 }
