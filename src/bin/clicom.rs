@@ -77,6 +77,12 @@ enum Cmd {
         #[arg(last = true, required = true, num_args = 1..)]
         cmd: Vec<String>,
     },
+    /// Identify which clicom-wrapped instance this process is running inside.
+    /// Walks the parent-PID chain; prints dir_name + path + pid + name + state.
+    Whoami {
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)] json: bool,
+    },
 }
 
 fn read_script_source(arg: Option<&str>, file: Option<&str>) -> anyhow::Result<String> {
@@ -134,6 +140,7 @@ fn main() -> anyhow::Result<()> {
             clicom::clicom_cli::quickops::wait_idle(&cwd, partial.as_deref(), ms, timeout)?,
         Cmd::Mcp => clicom::clicom_cli::cmd_mcp::run(&cwd)?,
         Cmd::ExecDetached { cmd } => clicom::clicom_cli::cmd_exec_detached::run(cmd)?,
+        Cmd::Whoami { json } => clicom::clicom_cli::cmd_whoami::run(&cwd, json)?,
     };
     std::process::exit(code);
 }

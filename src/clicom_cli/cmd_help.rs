@@ -40,6 +40,7 @@ SUBCOMMANDS:
     clean    Delete result triples (.out / .err / .done) from an instance's commands/
     mcp      Start a stdio MCP server (use from Claude Code / other MCP clients)
     exec-detached  Spawn a command in a new console window (Windows) and exit
+    whoami   Identify which clicom wrapper \"owns\" this process (walks parent PIDs)
     help     Show this help, or `clicom help <topic>` for details
 
 QUICK COMMANDS (no Rhai escaping required):
@@ -54,7 +55,7 @@ TOPICS:
     host-fns   Reference of all Rhai host functions (§4)
     script     Pointers to Rhai language docs and a one-page tutorial
     layout     The .clicom/ on-disk layout (§3)
-    start | status | run | queue | clean | mcp | exec-detached
+    start | status | run | queue | clean | mcp | exec-detached | whoami
         Long-form help for that subcommand
     type | keys | screen | screen-after | screen-after-re | wait-idle
         Long-form help for quick commands
@@ -79,6 +80,7 @@ pub fn run(topic: Option<&str>) -> i32 {
         Some("wait-idle")      => wait_idle_help(),
         Some("mcp")            => mcp_help(),
         Some("exec-detached")  => exec_detached_help(),
+        Some("whoami")         => whoami_help(),
         Some(other) => {
             eprintln!("clicom help: unknown topic '{other}'");
             return 2;
@@ -218,6 +220,26 @@ fn wait_idle_help() -> String {
      \n\
      EXAMPLE:\n\
        clicom wait-idle 1000 --timeout 30000   # wait up to 30s for 1s of silence\n".into()
+}
+
+fn whoami_help() -> String {
+    "clicom whoami [--json]\n\
+     \n\
+     Identify which clicom-wrapped instance this process is running inside.\n\
+     Walks the parent-PID chain from the current process; the first ancestor\n\
+     whose PID matches an instance under <cwd>/.clicom/ is reported.\n\
+     \n\
+     Useful when an agent (running inside a clicom-wrapped session) needs to know\n\
+     its own context — e.g. to write files into its own instance dir, or to pass\n\
+     its dir-name as --partial to other clicom commands.\n\
+     \n\
+     EXIT CODES:\n\
+       0  Found a wrapper ancestor; details printed to stdout.\n\
+       2  No wrapper ancestor found in <cwd>/.clicom/ (running outside a wrapper).\n\
+     \n\
+     EXAMPLES:\n\
+       clicom whoami\n\
+       clicom whoami --json\n".into()
 }
 
 fn exec_detached_help() -> String {

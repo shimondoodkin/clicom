@@ -215,6 +215,11 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "clicom_whoami",
+            "description": "Identify which clicom-wrapped instance this MCP server is running inside (walks parent-PID chain). Returns dir_name, path, wrapper_pid, name, state — or an error if not running inside a wrapper.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
+        json!({
             "name": "clicom_exec_detached",
             "description": "Spawn a command as a detached process. On Windows the child gets its own console window (CREATE_NEW_CONSOLE). On Unix the child inherits stdio. Returns the spawned pid. Useful for launching wrapped agents in a fresh terminal.",
             "inputSchema": {
@@ -465,6 +470,28 @@ fn tool_call(
                 "content": [{"type":"text","text":"cleaned"}],
                 "isError": false
             }))
+        }
+        "clicom_whoami" => {
+            match crate::clicom_cli::cmd_whoami::resolve_self(cwd, std::process::id()) {
+                Some(me) => {
+                    let v = json!({
+                        "dir_name": me.dir_name,
+                        "path": me.dir.display().to_string(),
+                        "wrapper_pid": me.meta.pid,
+                        "name": me.meta.name,
+                        "state": format!("{:?}", me.status.state).to_lowercase(),
+                        "started_at": me.meta.started_at.to_rfc3339(),
+                    });
+                    Ok(json!({
+                        "content": [{"type":"text","text": serde_json::to_string_pretty(&v).unwrap_or_default()}],
+                        "isError": false
+                    }))
+                }
+                None => Ok(json!({
+                    "content": [{"type":"text","text": format!("not running inside a clicom-wrapped process in {}", cwd.display())}],
+                    "isError": true
+                })),
+            }
         }
         "clicom_exec_detached" => {
             let cmd_arr = args.get("cmd").and_then(|v| v.as_array())
