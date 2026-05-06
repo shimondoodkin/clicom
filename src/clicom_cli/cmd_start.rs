@@ -29,6 +29,37 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
         std::path::Path::new(&args.command[0])
             .file_stem().and_then(|s| s.to_str()).unwrap_or("clicom").to_string()
     });
+
+    // STEP 1: Switch host console to raw VT mode immediately. Any keystroke
+    // typed from this point flows through our input forwarder rather than
+    // sitting in the line-input buffer or being eaten when the mode flips.
+    // RAII guard restores the original modes on Drop.
+    let _console_guard = clicom_engine::console_mode::enter_raw()?;
+
+    // STEP 2: Lightweight in-memory state required by PTY forwarders.
+    let screen = Arc::new(ScreenBuffer::new(40, 120));
+    let stop = Arc::new(AtomicBool::new(false));
+    let detector = Arc::new(std::sync::Mutex::new(IdleDetector::new(1, Instant::now())));
+    let (idle_tx, idle_rx) = crossbeam_channel::unbounded::<IdleEvent>();
+    let (nudge_tx, nudge_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+
+    // STEP 3: PTY spawn + forwarders BEFORE any file I/O.
+    // Why: ChicomChannel::create + retention sweep + gitignore + watcher init
+    // can take tens of ms. If the user starts typing during that window with
+    // the input forwarder not yet alive, we lose those keystrokes (they hit
+    // the OS input buffer in a mode that gets flipped/discarded). Spawning
+    // the PTY+forwarders first means the input pipeline is live from the
+    // very first keystroke.
+    let pty_fwd = if !args.nopty {
+        Some(spawn_pty_and_forwarders(
+            &args.command, args.mouse, nudge_rx.clone(),
+            &screen, &detector,
+        )?)
+    } else {
+        None
+    };
+
+    // STEP 4: File I/O + ancillary thread setup (formerly the head of run()).
     let ch = ClicomChannel::create(cwd, pid, name, args.command.clone())?;
     retention::sweep_dead_instances(cwd, pid, 10)?;
     let _ = gitignore::ensure_clicom_ignored(cwd);
@@ -42,11 +73,7 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
         });
     }
 
-    let screen = Arc::new(ScreenBuffer::new(40, 120));
-    let stop = Arc::new(AtomicBool::new(false));
-
     // Snapshot writer thread: write screen.txt on each idle transition + at most every 250ms.
-    let (idle_tx, idle_rx) = crossbeam_channel::unbounded::<IdleEvent>();
     {
         let screen = Arc::clone(&screen);
         let stop = Arc::clone(&stop);
@@ -55,7 +82,6 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
         thread::spawn(move || {
             let mut last_write = Instant::now() - Duration::from_secs(1);
             while !stop.load(Ordering::SeqCst) {
-                // Drain idle events (state transitions).
                 while let Ok(ev) = idle_rx.try_recv() {
                     let s = match ev { IdleEvent::BecameIdle => State::Idle, IdleEvent::BecameBusy => State::Busy };
                     if let Ok(mut st) = status.lock() {
@@ -67,7 +93,6 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
                     let _ = clicom_engine::fs_atomic::write(&layout::screen_path(&inst_dir), body.as_bytes());
                     last_write = Instant::now();
                 }
-                // Throttled snapshot.
                 if last_write.elapsed() >= Duration::from_millis(250) {
                     let body = screen.to_plain_text();
                     let _ = clicom_engine::fs_atomic::write(&layout::screen_path(&inst_dir), body.as_bytes());
@@ -79,7 +104,6 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
     }
 
     // Idle detector ticker.
-    let detector = Arc::new(std::sync::Mutex::new(IdleDetector::new(1, Instant::now())));
     {
         let det = Arc::clone(&detector);
         let stop = Arc::clone(&stop);
@@ -96,7 +120,6 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
     }
 
     // Build Rhai engine + host context, then spawn the commands/ watcher.
-    let (nudge_tx, nudge_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
     let ctx = std::sync::Arc::new(rhai_host::HostContext {
         screen: Arc::clone(&screen),
         nudge_tx: nudge_tx.clone(),
@@ -111,39 +134,76 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
     let engine = Arc::new(engine);
     let _watcher_guard = watcher::spawn_watcher(ch.instance_dir.clone(), Arc::clone(&engine), Arc::clone(&ctx), 60_000)?;
 
-    // Spawn child + forwarding loop. Uses pty/nopty per args.
-    let exit_code = if args.nopty {
-        spawn_and_forward_nopty(&args.command, nudge_rx, &screen, &detector, &idle_tx)?
-    } else {
-        spawn_and_forward_pty(&args.command, args.mouse, nudge_rx, &screen, &detector, &idle_tx)?
+    // STEP 5: Wait for the child.
+    let exit_code = match pty_fwd {
+        Some(mut p) => p.wait()?,
+        None => spawn_and_forward_nopty(&args.command, nudge_rx, &screen, &detector, &idle_tx)?,
     };
+    trace_exit("child exited");
 
     // Final snapshot before flipping to exited.
     let body = screen.to_plain_text();
     let _ = clicom_engine::fs_atomic::write(&layout::screen_path(&ch.instance_dir), body.as_bytes());
+    trace_exit("snapshot written");
     ch.on_shutdown(exit_code)?;
+    trace_exit("on_shutdown done");
     stop.store(true, Ordering::SeqCst);
+    trace_exit("returning to main");
     Ok(exit_code)
 }
 
-fn spawn_and_forward_pty(
+/// Breadcrumb to stderr when `CLICOM_TRACE_EXIT` is set. The PTY child has
+/// already exited by the time we use this, but the host console may still be
+/// in raw VT mode (the `_console_guard` is still alive), so we emit `\r\n`
+/// instead of bare `\n` to render correctly under DISABLE_NEWLINE_AUTO_RETURN.
+fn trace_exit(msg: &str) {
+    if std::env::var_os("CLICOM_TRACE_EXIT").is_some() {
+        eprint!("[clicom-exit] {msg}\r\n");
+    }
+}
+
+/// Active PTY + forwarder threads. Hold this struct alive while the rest of
+/// `run()` does its slow setup; call `wait()` to block on the child.
+///
+/// Forwarder/bridge join handles are intentionally kept underscore-prefixed
+/// and never joined: on Windows ConPTY the master reader doesn't reliably
+/// deliver EOF when the child exits, so the output forwarder can stay blocked
+/// on `read()` indefinitely — and the bridge thread, which receives from a
+/// channel the output forwarder feeds, would block with it. Joining them
+/// would hang the wrapper on exit. They're detached; the OS reaps them when
+/// the process exits.
+struct PtyForward {
+    _pair: portable_pty::PtyPair,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    _bridge: thread::JoinHandle<()>,
+    _input_h: thread::JoinHandle<anyhow::Result<()>>,
+    _output_h: thread::JoinHandle<anyhow::Result<()>>,
+}
+
+impl PtyForward {
+    fn wait(&mut self) -> Result<i32> {
+        let status = self.child.wait()?;
+        Ok(status.exit_code() as i32)
+    }
+}
+
+fn spawn_pty_and_forwarders(
     command: &[String],
-    mouse_allow: bool,  // true = --mouse flag was passed (allow passthrough); false = strip
+    mouse_allow: bool,
     nudge_rx: crossbeam_channel::Receiver<Vec<u8>>,
     screen: &Arc<ScreenBuffer>,
     detector: &Arc<std::sync::Mutex<IdleDetector>>,
-    idle_tx: &crossbeam_channel::Sender<IdleEvent>,
-) -> Result<i32> {
+) -> Result<PtyForward> {
     use crate::clicom_engine::forwarding::{spawn_input_forwarder, spawn_output_forwarder, AgentBytes};
     use crate::clicom_engine::pty::{spawn as pty_spawn, current_terminal_size};
     let strip_mouse = !mouse_allow;
-    let mut pty = pty_spawn(command.to_vec(), current_terminal_size())?;
+    let pty = pty_spawn(command.to_vec(), current_terminal_size())?;
     let writer = pty.pair.master.take_writer()?;
     let reader = pty.pair.master.try_clone_reader()?;
     let (tap_tx, tap_rx) = crossbeam_channel::unbounded::<AgentBytes>();
-    let _in_h = spawn_input_forwarder(writer, nudge_rx);
-    let _out_h = spawn_output_forwarder(reader, tap_tx, strip_mouse);
-    // Bridge tap → screen + idle.
+    let in_h = spawn_input_forwarder(writer, nudge_rx);
+    let out_h = spawn_output_forwarder(reader, tap_tx, strip_mouse);
+
     let screen_clone = Arc::clone(screen);
     let det_clone = Arc::clone(detector);
     let bridge = std::thread::spawn(move || {
@@ -159,10 +219,14 @@ fn spawn_and_forward_pty(
             }
         }
     });
-    let status = pty.child.wait()?;
-    let _ = bridge.join();
-    let _ = idle_tx; // detector ticker thread will react
-    Ok(status.exit_code() as i32)
+
+    Ok(PtyForward {
+        _pair: pty.pair,
+        child: pty.child,
+        _bridge: bridge,
+        _input_h: in_h,
+        _output_h: out_h,
+    })
 }
 
 fn spawn_and_forward_nopty(

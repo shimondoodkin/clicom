@@ -10,6 +10,7 @@ pub mod idle;
 pub mod nudge;
 pub mod pty;
 pub mod nopty;
+pub mod console_mode;
 pub mod forwarding;
 pub mod retention;
 pub mod mouse_filter;
