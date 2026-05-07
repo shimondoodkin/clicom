@@ -137,32 +137,37 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "clicom_screen",
-            "description": "Print the wrapped agent's current visible screen.",
+            "description": "Print the wrapped agent's current visible screen. A `[clicom: …]` status trailer is appended by default; pass no_status: true for raw output.",
             "inputSchema": {
                 "type": "object",
-                "properties": {"partial": partial_field}
+                "properties": {
+                    "partial": partial_field,
+                    "no_status": {"type": "boolean", "default": false, "description": "Suppress the [clicom: …] trailer."}
+                }
             }
         }),
         json!({
             "name": "clicom_screen_after",
-            "description": "Return everything after the last occurrence of <marker>.",
+            "description": "Return everything after the last occurrence of <marker>. A `[clicom: …]` status trailer is appended by default; pass no_status: true for raw output.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "marker": {"type": "string"},
-                    "partial": partial_field
+                    "partial": partial_field,
+                    "no_status": {"type": "boolean", "default": false, "description": "Suppress the [clicom: …] trailer."}
                 },
                 "required": ["marker"]
             }
         }),
         json!({
             "name": "clicom_screen_after_re",
-            "description": "Return everything after the last regex match of <pattern>.",
+            "description": "Return everything after the last regex match of <pattern>. A `[clicom: …]` status trailer is appended by default; pass no_status: true for raw output.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string"},
-                    "partial": partial_field
+                    "partial": partial_field,
+                    "no_status": {"type": "boolean", "default": false, "description": "Suppress the [clicom: …] trailer."}
                 },
                 "required": ["pattern"]
             }
@@ -399,25 +404,31 @@ fn tool_call(
         }
         "clicom_screen" => {
             let partial = s_opt(&args, "partial");
-            run_script(cwd, partial, "screen_text()".to_string())
+            let no_status = b_opt(&args, "no_status");
+            let src = if no_status { "screen_text()" } else { "screen_text(true)" };
+            run_script(cwd, partial, src.to_string())
         }
         "clicom_screen_after" => {
             let marker = s_arg(&args, "marker")?;
             let partial = s_opt(&args, "partial");
-            run_script(
-                cwd,
-                partial,
-                format!("screen_last_after({})", rhai_str_lit(marker)),
-            )
+            let no_status = b_opt(&args, "no_status");
+            let src = if no_status {
+                format!("screen_last_after({})", rhai_str_lit(marker))
+            } else {
+                format!("screen_last_after({}, true)", rhai_str_lit(marker))
+            };
+            run_script(cwd, partial, src)
         }
         "clicom_screen_after_re" => {
             let pattern = s_arg(&args, "pattern")?;
             let partial = s_opt(&args, "partial");
-            run_script(
-                cwd,
-                partial,
-                format!("screen_last_after_re({})", rhai_str_lit(pattern)),
-            )
+            let no_status = b_opt(&args, "no_status");
+            let src = if no_status {
+                format!("screen_last_after_re({})", rhai_str_lit(pattern))
+            } else {
+                format!("screen_last_after_re({}, true)", rhai_str_lit(pattern))
+            };
+            run_script(cwd, partial, src)
         }
         "clicom_wait_idle" => {
             let ms = i_opt(&args, "ms", 800);
