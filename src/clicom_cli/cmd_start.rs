@@ -36,6 +36,16 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
     // RAII guard restores the original modes on Drop.
     let _console_guard = clicom_engine::console_mode::enter_raw()?;
 
+    // Without --mouse: actively turn host mouse capture OFF so the user can
+    // click-drag for text selection. The output forwarder also strips any
+    // enable sequences the wrapped TUI emits (see spawn_pty_and_forwarders),
+    // but that only blocks future enables — anything left on by a prior
+    // program would still be active. This force-disable is the belt to the
+    // filter's suspenders.
+    if !args.mouse {
+        clicom_engine::console_mode::disable_mouse_modes();
+    }
+
     // STEP 2: Lightweight in-memory state required by PTY forwarders.
     let screen = Arc::new(ScreenBuffer::new(40, 120));
     let stop = Arc::new(AtomicBool::new(false));

@@ -96,3 +96,19 @@ mod imp {
 }
 
 pub use imp::{enter_raw, ConsoleModeGuard};
+
+/// Force-disable every standard VT mouse-tracking mode on the host stdout.
+/// Use this when `--mouse` is NOT set: it guarantees mouse capture is off
+/// even if a prior program left a mode enabled. The output forwarder then
+/// strips any mouse-enable sequences the wrapped TUI emits, so mouse stays
+/// off for the whole wrapper lifetime.
+///
+/// Modes disabled (DEC private mode reset): 9 (X10), 1000-1006 (button/cell/
+/// motion/focus/UTF-8/SGR), 1015 (urxvt), 1016 (SGR pixel).
+pub fn disable_mouse_modes() {
+    use std::io::Write;
+    let seq = b"\x1b[?9;1000;1001;1002;1003;1004;1005;1006;1015;1016l";
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(seq);
+    let _ = stdout.flush();
+}
