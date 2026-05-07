@@ -31,16 +31,19 @@ pub fn type_keys(cwd: &Path, partial: Option<&str>, spec: &str) -> Result<i32> {
     run_with(cwd, partial, format!("type_keys({})", rhai_str_lit(spec)))
 }
 
-/// If exactly one instance matches and its state is Died or Exited, read its
-/// persisted `screen.txt`, apply `transform`, optionally append the trailer,
-/// print, and return `Some(0)`. Otherwise return `None` so the caller falls
-/// through to the live (script-drop) path.
-fn try_dead_instance_fallback<F>(
+/// Build the dead-instance fallback response *as a string* (without printing).
+/// Returns:
+/// - `Ok(Some(text))` when the partial resolves to exactly one Died/Exited
+///   instance — `text` is the transformed body, optionally with a trailing
+///   `\n[clicom: …]` trailer.
+/// - `Ok(None)` when the fallback doesn't apply (zero/many/live candidates) —
+///   caller should fall through to the live script-drop path.
+pub fn try_dead_instance_response<F>(
     cwd: &Path,
     partial: Option<&str>,
     no_status: bool,
     transform: F,
-) -> Result<Option<i32>>
+) -> Result<Option<String>>
 where
     F: FnOnce(&str) -> String,
 {
@@ -61,7 +64,7 @@ where
     })?;
     let transformed = transform(&body);
     if no_status {
-        print!("{transformed}");
+        Ok(Some(transformed))
     } else {
         let rows: u16 = body.lines().count().min(u16::MAX as usize) as u16;
         let trailer = status_trailer::format(
@@ -69,9 +72,36 @@ where
             inst.status.last_activity,
             rows,
         );
-        println!("{transformed}\n{trailer}");
+        Ok(Some(format!("{transformed}\n{trailer}")))
     }
-    Ok(Some(0))
+}
+
+/// If exactly one instance matches and its state is Died or Exited, read its
+/// persisted `screen.txt`, apply `transform`, optionally append the trailer,
+/// print, and return `Some(0)`. Otherwise return `None` so the caller falls
+/// through to the live (script-drop) path.
+fn try_dead_instance_fallback<F>(
+    cwd: &Path,
+    partial: Option<&str>,
+    no_status: bool,
+    transform: F,
+) -> Result<Option<i32>>
+where
+    F: FnOnce(&str) -> String,
+{
+    match try_dead_instance_response(cwd, partial, no_status, transform)? {
+        Some(text) => {
+            // Mirror the existing semantics: with-trailer prints with newline,
+            // raw mode preserves bytes verbatim.
+            if no_status {
+                print!("{text}");
+            } else {
+                println!("{text}");
+            }
+            Ok(Some(0))
+        }
+        None => Ok(None),
+    }
 }
 
 pub fn screen(cwd: &Path, partial: Option<&str>, no_status: bool) -> Result<i32> {

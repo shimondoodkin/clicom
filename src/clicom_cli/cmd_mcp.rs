@@ -352,6 +352,16 @@ fn i_opt(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key).and_then(|v| v.as_i64()).unwrap_or(default)
 }
 
+/// Wrap a successful dead-instance fallback response into the MCP envelope
+/// (mirrors run_script's OK branch).
+fn dead_response_envelope(text: String) -> Value {
+    let display = if text.is_empty() { "(ok)".to_string() } else { text };
+    json!({
+        "content": [{"type":"text","text": display}],
+        "isError": false
+    })
+}
+
 fn tool_call(
     name: &str,
     args: Value,
@@ -405,6 +415,16 @@ fn tool_call(
         "clicom_screen" => {
             let partial = s_opt(&args, "partial");
             let no_status = b_opt(&args, "no_status");
+            match crate::clicom_cli::quickops::try_dead_instance_response(
+                cwd,
+                partial.as_deref(),
+                no_status,
+                |s| s.to_string(),
+            ) {
+                Ok(Some(text)) => return Ok(dead_response_envelope(text)),
+                Ok(None) => {}
+                Err(e) => return Err((-32000, format!("dead-fallback: {e}"))),
+            }
             let src = if no_status { "screen_text()" } else { "screen_text(true)" };
             run_script(cwd, partial, src.to_string())
         }
@@ -412,10 +432,24 @@ fn tool_call(
             let marker = s_arg(&args, "marker")?;
             let partial = s_opt(&args, "partial");
             let no_status = b_opt(&args, "no_status");
+            let m = marker.to_string();
+            match crate::clicom_cli::quickops::try_dead_instance_response(
+                cwd,
+                partial.as_deref(),
+                no_status,
+                |s| match s.rfind(&m) {
+                    Some(idx) => s[idx + m.len()..].to_string(),
+                    None => String::new(),
+                },
+            ) {
+                Ok(Some(text)) => return Ok(dead_response_envelope(text)),
+                Ok(None) => {}
+                Err(e) => return Err((-32000, format!("dead-fallback: {e}"))),
+            }
             let src = if no_status {
-                format!("screen_last_after({})", rhai_str_lit(marker))
+                format!("screen_last_after({})", crate::clicom_cli::quickops::rhai_str_lit(marker))
             } else {
-                format!("screen_last_after({}, true)", rhai_str_lit(marker))
+                format!("screen_last_after({}, true)", crate::clicom_cli::quickops::rhai_str_lit(marker))
             };
             run_script(cwd, partial, src)
         }
@@ -423,10 +457,28 @@ fn tool_call(
             let pattern = s_arg(&args, "pattern")?;
             let partial = s_opt(&args, "partial");
             let no_status = b_opt(&args, "no_status");
+            // Compile up-front so the dead-fallback errors on bad patterns the
+            // same way the live path does (matches quickops::screen_after_re).
+            let re_compiled = regex::Regex::new(pattern)
+                .map_err(|e| (-32000, format!("regex compile: {e}")))?;
+            match crate::clicom_cli::quickops::try_dead_instance_response(
+                cwd,
+                partial.as_deref(),
+                no_status,
+                move |s| {
+                    let mut last_end: Option<usize> = None;
+                    for m in re_compiled.find_iter(s) { last_end = Some(m.end()); }
+                    last_end.map(|i| s[i..].to_string()).unwrap_or_default()
+                },
+            ) {
+                Ok(Some(text)) => return Ok(dead_response_envelope(text)),
+                Ok(None) => {}
+                Err(e) => return Err((-32000, format!("dead-fallback: {e}"))),
+            }
             let src = if no_status {
-                format!("screen_last_after_re({})", rhai_str_lit(pattern))
+                format!("screen_last_after_re({})", crate::clicom_cli::quickops::rhai_str_lit(pattern))
             } else {
-                format!("screen_last_after_re({}, true)", rhai_str_lit(pattern))
+                format!("screen_last_after_re({}, true)", crate::clicom_cli::quickops::rhai_str_lit(pattern))
             };
             run_script(cwd, partial, src)
         }
