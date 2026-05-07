@@ -29,16 +29,27 @@ pub fn type_keys(cwd: &Path, partial: Option<&str>, spec: &str) -> Result<i32> {
     run_with(cwd, partial, format!("type_keys({})", rhai_str_lit(spec)))
 }
 
-pub fn screen(cwd: &Path, partial: Option<&str>) -> Result<i32> {
-    run_with(cwd, partial, "screen_text()".to_string())
+pub fn screen(cwd: &Path, partial: Option<&str>, no_status: bool) -> Result<i32> {
+    let src = if no_status { "screen_text()" } else { "screen_text(true)" };
+    run_with(cwd, partial, src.to_string())
 }
 
-pub fn screen_after(cwd: &Path, partial: Option<&str>, marker: &str) -> Result<i32> {
-    run_with(cwd, partial, format!("screen_last_after({})", rhai_str_lit(marker)))
+pub fn screen_after(cwd: &Path, partial: Option<&str>, marker: &str, no_status: bool) -> Result<i32> {
+    let src = if no_status {
+        format!("screen_last_after({})", rhai_str_lit(marker))
+    } else {
+        format!("screen_last_after({}, true)", rhai_str_lit(marker))
+    };
+    run_with(cwd, partial, src)
 }
 
-pub fn screen_after_re(cwd: &Path, partial: Option<&str>, pattern: &str) -> Result<i32> {
-    run_with(cwd, partial, format!("screen_last_after_re({})", rhai_str_lit(pattern)))
+pub fn screen_after_re(cwd: &Path, partial: Option<&str>, pattern: &str, no_status: bool) -> Result<i32> {
+    let src = if no_status {
+        format!("screen_last_after_re({})", rhai_str_lit(pattern))
+    } else {
+        format!("screen_last_after_re({}, true)", rhai_str_lit(pattern))
+    };
+    run_with(cwd, partial, src)
 }
 
 pub fn wait_idle(cwd: &Path, partial: Option<&str>, ms: u64, timeout_ms: Option<u64>) -> Result<i32> {

@@ -51,15 +51,18 @@ enum Cmd {
     /// Print the wrapped agent's current visible screen.
     Screen {
         #[arg(long)] partial: Option<String>,
+        #[arg(long)] no_status: bool,
     },
     /// Print everything after the last occurrence of <marker>.
     ScreenAfter {
         #[arg(long)] partial: Option<String>,
+        #[arg(long)] no_status: bool,
         marker: String,
     },
     /// Print everything after the last regex match of <pattern>.
     ScreenAfterRe {
         #[arg(long)] partial: Option<String>,
+        #[arg(long)] no_status: bool,
         pattern: String,
     },
     /// Wait until the agent has been idle for <ms> ms.
@@ -130,12 +133,12 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Keys { partial, spec } =>
             clicom::clicom_cli::quickops::type_keys(&cwd, partial.as_deref(), &spec)?,
-        Cmd::Screen { partial } =>
-            clicom::clicom_cli::quickops::screen(&cwd, partial.as_deref())?,
-        Cmd::ScreenAfter { partial, marker } =>
-            clicom::clicom_cli::quickops::screen_after(&cwd, partial.as_deref(), &marker)?,
-        Cmd::ScreenAfterRe { partial, pattern } =>
-            clicom::clicom_cli::quickops::screen_after_re(&cwd, partial.as_deref(), &pattern)?,
+        Cmd::Screen { partial, no_status } =>
+            clicom::clicom_cli::quickops::screen(&cwd, partial.as_deref(), no_status)?,
+        Cmd::ScreenAfter { partial, no_status, marker } =>
+            clicom::clicom_cli::quickops::screen_after(&cwd, partial.as_deref(), &marker, no_status)?,
+        Cmd::ScreenAfterRe { partial, no_status, pattern } =>
+            clicom::clicom_cli::quickops::screen_after_re(&cwd, partial.as_deref(), &pattern, no_status)?,
         Cmd::WaitIdle { partial, ms, timeout } =>
             clicom::clicom_cli::quickops::wait_idle(&cwd, partial.as_deref(), ms, timeout)?,
         Cmd::Mcp => clicom::clicom_cli::cmd_mcp::run(&cwd)?,
