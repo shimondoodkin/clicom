@@ -11,6 +11,7 @@ pub mod nudge;
 pub mod pty;
 pub mod nopty;
 pub mod console_mode;
+pub mod status_trailer;
 pub mod forwarding;
 pub mod retention;
 pub mod mouse_filter;
