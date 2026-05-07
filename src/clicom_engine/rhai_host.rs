@@ -178,9 +178,20 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
         Ok(())
     });
 
-    // screen_text
-    let c = Arc::clone(&ctx);
-    engine.register_fn("screen_text", move || -> String { c.screen.to_plain_text() });
+    // screen_text() / screen_text(prepend_status: bool)
+    {
+        let c = Arc::clone(&ctx);
+        engine.register_fn("screen_text", move || -> String { c.screen.to_plain_text() });
+        let c = Arc::clone(&ctx);
+        engine.register_fn("screen_text", move |prepend_status: bool| -> String {
+            let text = c.screen.to_plain_text();
+            if prepend_status {
+                format!("{text}\n{}", build_status_trailer(&c))
+            } else {
+                text
+            }
+        });
+    }
 
     // clicom_status_trailer — returns the trailer line (no leading newline).
     let c = Arc::clone(&ctx);
@@ -198,15 +209,30 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
         Ok(body.as_bytes().len() as i64)
     });
 
-    // screen_last_after
-    let c = Arc::clone(&ctx);
-    engine.register_fn("screen_last_after", move |marker: &str| -> String {
-        let lifetime = c.screen.lifetime_text();
-        match lifetime.rfind(marker) {
-            Some(idx) => lifetime[idx + marker.len()..].to_string(),
-            None => String::new(),
-        }
-    });
+    // screen_last_after(marker) / screen_last_after(marker, prepend_status)
+    {
+        let c = Arc::clone(&ctx);
+        engine.register_fn("screen_last_after", move |marker: &str| -> String {
+            let lifetime = c.screen.lifetime_text();
+            match lifetime.rfind(marker) {
+                Some(idx) => lifetime[idx + marker.len()..].to_string(),
+                None => String::new(),
+            }
+        });
+        let c = Arc::clone(&ctx);
+        engine.register_fn("screen_last_after", move |marker: &str, prepend_status: bool| -> String {
+            let lifetime = c.screen.lifetime_text();
+            let text = match lifetime.rfind(marker) {
+                Some(idx) => lifetime[idx + marker.len()..].to_string(),
+                None => String::new(),
+            };
+            if prepend_status {
+                format!("{text}\n{}", build_status_trailer(&c))
+            } else {
+                text
+            }
+        });
+    }
 
     // screen_save_last_after
     let c = Arc::clone(&ctx);
@@ -219,16 +245,32 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
         Ok(body.as_bytes().len() as i64)
     });
 
-    // screen_last_after_re
-    let c = Arc::clone(&ctx);
-    engine.register_fn("screen_last_after_re", move |pattern: &str| -> Result<String, Box<rhai::EvalAltResult>> {
-        let re = regex::Regex::new(pattern)
-            .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("regex compile: {e}").into(), rhai::Position::NONE)))?;
-        let lifetime = c.screen.lifetime_text();
-        let mut last_end: Option<usize> = None;
-        for m in re.find_iter(&lifetime) { last_end = Some(m.end()); }
-        Ok(last_end.map(|i| lifetime[i..].to_string()).unwrap_or_default())
-    });
+    // screen_last_after_re(pattern) / screen_last_after_re(pattern, prepend_status)
+    {
+        let c = Arc::clone(&ctx);
+        engine.register_fn("screen_last_after_re", move |pattern: &str| -> Result<String, Box<rhai::EvalAltResult>> {
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("regex compile: {e}").into(), rhai::Position::NONE)))?;
+            let lifetime = c.screen.lifetime_text();
+            let mut last_end: Option<usize> = None;
+            for m in re.find_iter(&lifetime) { last_end = Some(m.end()); }
+            Ok(last_end.map(|i| lifetime[i..].to_string()).unwrap_or_default())
+        });
+        let c = Arc::clone(&ctx);
+        engine.register_fn("screen_last_after_re", move |pattern: &str, prepend_status: bool| -> Result<String, Box<rhai::EvalAltResult>> {
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| Box::new(rhai::EvalAltResult::ErrorRuntime(format!("regex compile: {e}").into(), rhai::Position::NONE)))?;
+            let lifetime = c.screen.lifetime_text();
+            let mut last_end: Option<usize> = None;
+            for m in re.find_iter(&lifetime) { last_end = Some(m.end()); }
+            let text = last_end.map(|i| lifetime[i..].to_string()).unwrap_or_default();
+            if prepend_status {
+                Ok(format!("{text}\n{}", build_status_trailer(&c)))
+            } else {
+                Ok(text)
+            }
+        });
+    }
 
     // screen_save_last_after_re
     let c = Arc::clone(&ctx);
@@ -1212,5 +1254,57 @@ mod tests {
         let stdout = m["stdout"].clone().into_string().unwrap();
         assert_eq!(exit_code, 0);
         assert!(stdout.contains("hello"), "stdout: {stdout:?}");
+    }
+
+    // ── prepend_status overload tests ─────────────────────────────────────────
+
+    #[test]
+    fn screen_text_no_arg_is_raw() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        screen.advance_bytes(b"hi");
+        let ctx = make_ctx(Arc::clone(&screen));
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, "screen_text()").unwrap();
+        let s: String = v.into_string().unwrap();
+        assert!(!s.contains("[clicom:"), "no-arg form must NOT prepend status; got: {s:?}");
+    }
+
+    #[test]
+    fn screen_text_true_appends_trailer() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        screen.advance_bytes(b"hi");
+        let ctx = make_ctx(Arc::clone(&screen));
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, "screen_text(true)").unwrap();
+        let s: String = v.into_string().unwrap();
+        assert!(s.contains("\n[clicom: state="), "1-arg true must append trailer on its own line; got: {s:?}");
+    }
+
+    #[test]
+    fn screen_last_after_two_arg_true_appends_trailer() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        screen.advance_bytes(b"prefix-MARK-suffix");
+        let ctx = make_ctx(Arc::clone(&screen));
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, "screen_last_after(\"MARK\", true)").unwrap();
+        let s: String = v.into_string().unwrap();
+        assert!(s.starts_with("-suffix"), "transform must run before trailer; got: {s:?}");
+        assert!(s.contains("\n[clicom: state="), "trailer must be appended; got: {s:?}");
+    }
+
+    #[test]
+    fn screen_last_after_re_two_arg_true_appends_trailer() {
+        let screen = Arc::new(ScreenBuffer::new(5, 80));
+        screen.advance_bytes(b"abc-123-tail");
+        let ctx = make_ctx(Arc::clone(&screen));
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, "screen_last_after_re(\"\\\\d+\", true)").unwrap();
+        let s: String = v.into_string().unwrap();
+        assert!(s.starts_with("-tail"), "regex transform must run before trailer; got: {s:?}");
+        assert!(s.contains("\n[clicom: state="), "trailer must be appended; got: {s:?}");
     }
 }
