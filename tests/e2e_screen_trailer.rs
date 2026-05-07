@@ -103,3 +103,19 @@ fn screen_after_re_dead_instance_applies_regex_then_trailer() {
     assert!(first_line.starts_with("-tail"), "regex transform missing: {stdout:?}");
     assert!(stdout.contains("[clicom: state=died"), "trailer missing: {stdout:?}");
 }
+
+#[test]
+fn screen_after_re_invalid_regex_against_dead_instance_errors() {
+    let td = TempDir::new().unwrap();
+    craft_dead_instance(&td, "abc-123-tail\n");
+
+    // "(" is an unterminated group — regex compile fails.
+    let out = Command::cargo_bin("clicom").unwrap()
+        .current_dir(td.path())
+        .args(["screen-after-re", "("])
+        .output().unwrap();
+    assert!(!out.status.success(), "invalid regex must produce non-zero exit; stdout: {:?}, stderr: {:?}",
+        String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("regex"), "stderr should mention 'regex': {stderr:?}");
+}

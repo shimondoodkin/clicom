@@ -99,16 +99,12 @@ pub fn screen_after(cwd: &Path, partial: Option<&str>, marker: &str, no_status: 
 }
 
 pub fn screen_after_re(cwd: &Path, partial: Option<&str>, pattern: &str, no_status: bool) -> Result<i32> {
-    let pat = pattern.to_string();
-    if let Some(code) = try_dead_instance_fallback(cwd, partial, no_status, |s| {
-        match regex::Regex::new(&pat) {
-            Ok(re) => {
-                let mut last_end: Option<usize> = None;
-                for m in re.find_iter(s) { last_end = Some(m.end()); }
-                last_end.map(|i| s[i..].to_string()).unwrap_or_default()
-            }
-            Err(_) => String::new(),
-        }
+    let re_compiled = regex::Regex::new(pattern)
+        .map_err(|e| anyhow::anyhow!("regex compile: {e}"))?;
+    if let Some(code) = try_dead_instance_fallback(cwd, partial, no_status, move |s| {
+        let mut last_end: Option<usize> = None;
+        for m in re_compiled.find_iter(s) { last_end = Some(m.end()); }
+        last_end.map(|i| s[i..].to_string()).unwrap_or_default()
     })? {
         return Ok(code);
     }
