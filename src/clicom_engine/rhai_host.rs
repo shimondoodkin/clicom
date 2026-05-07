@@ -141,6 +141,15 @@ fn env_or_default(name: &str, def: usize) -> usize {
     std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(def)
 }
 
+fn build_status_trailer(ctx: &HostContext) -> String {
+    let (state, last_activity) = {
+        let s = ctx.status.lock().expect("status mutex poisoned");
+        (crate::clicom_engine::status_trailer::TrailerState::from(s.state), s.last_activity)
+    };
+    let (rows, _cols) = ctx.screen.visible_dims();
+    crate::clicom_engine::status_trailer::format(state, last_activity, rows)
+}
+
 pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
     // type_text(s) — default: translate bare \n to \r
     let c = Arc::clone(&ctx);
@@ -172,6 +181,12 @@ pub fn register_host_fns(engine: &mut Engine, ctx: Arc<HostContext>) {
     // screen_text
     let c = Arc::clone(&ctx);
     engine.register_fn("screen_text", move || -> String { c.screen.to_plain_text() });
+
+    // clicom_status_trailer — returns the trailer line (no leading newline).
+    let c = Arc::clone(&ctx);
+    engine.register_fn("clicom_status_trailer", move || -> String {
+        build_status_trailer(&c)
+    });
 
     // screen_save
     let c = Arc::clone(&ctx);
@@ -1167,6 +1182,21 @@ mod tests {
         assert!(td.path().join("a/b/c").is_dir());
         // Calling twice must also be OK
         let _ = run_script(&e, "mkdirp(\"a/b/c\")").unwrap();
+    }
+
+    // ── Status trailer test ───────────────────────────────────────────────────
+
+    #[test]
+    fn clicom_status_trailer_returns_formatted_line() {
+        let screen = Arc::new(ScreenBuffer::new(40, 80));
+        let ctx = make_ctx(Arc::clone(&screen));
+        let mut e = build_engine();
+        register_host_fns(&mut e, ctx);
+        let v = run_script(&e, "clicom_status_trailer()").unwrap();
+        let s: String = v.into_string().unwrap();
+        // Default test status is initial_busy() → state=active, visible_rows=40
+        assert!(s.starts_with("[clicom: state=active  last_activity="), "got: {s}");
+        assert!(s.ends_with("  visible_rows=40]"), "got: {s}");
     }
 
     // ── Shell test ────────────────────────────────────────────────────────────
