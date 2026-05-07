@@ -122,6 +122,7 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
     // Build Rhai engine + host context, then spawn the commands/ watcher.
     let ctx = std::sync::Arc::new(rhai_host::HostContext {
         screen: Arc::clone(&screen),
+        status: Arc::clone(&ch.status),
         nudge_tx: nudge_tx.clone(),
         instance_cwd: cwd.to_path_buf(),
         idle_observer: Arc::clone(&detector),

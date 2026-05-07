@@ -113,6 +113,7 @@ fn lookup_key(tok: &str) -> Result<Vec<u8>, String> {
 
 pub struct HostContext {
     pub screen: Arc<ScreenBuffer>,
+    pub status: Arc<std::sync::Mutex<crate::clicom_engine::meta::Status>>,
     pub nudge_tx: crossbeam_channel::Sender<Vec<u8>>,
     /// The wrapper's process cwd (per spec §4 — used to resolve relative paths in host fns).
     pub instance_cwd: std::path::PathBuf,
@@ -760,6 +761,7 @@ mod tests {
         let (tx, _rx) = crossbeam_channel::unbounded();
         Arc::new(HostContext {
             screen,
+            status: Arc::new(std::sync::Mutex::new(crate::clicom_engine::meta::Status::initial_busy())),
             nudge_tx: tx,
             instance_cwd: cwd,
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
@@ -774,6 +776,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let ctx = Arc::new(HostContext {
             screen: Arc::new(ScreenBuffer::new(10, 80)),
+            status: Arc::new(std::sync::Mutex::new(crate::clicom_engine::meta::Status::initial_busy())),
             nudge_tx: tx,
             instance_cwd: cwd,
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
@@ -868,6 +871,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let ctx2 = Arc::new(HostContext {
             screen: Arc::new(ScreenBuffer::new(10, 80)),
+            status: Arc::new(std::sync::Mutex::new(crate::clicom_engine::meta::Status::initial_busy())),
             nudge_tx: tx,
             instance_cwd: std::env::temp_dir(),
             idle_observer: Arc::new(std::sync::Mutex::new(crate::clicom_engine::idle::IdleDetector::new(1, std::time::Instant::now()))),
