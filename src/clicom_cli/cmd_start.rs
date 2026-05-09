@@ -47,7 +47,10 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
     }
 
     // STEP 2: Lightweight in-memory state required by PTY forwarders.
-    let screen = Arc::new(ScreenBuffer::new(40, 120));
+    // Size the captured vt100 grid to the host terminal so screen.txt matches
+    // what the wrapped TUI renders. Same dims feed into the PTY spawn below.
+    let initial_size = clicom_engine::pty::current_terminal_size();
+    let screen = Arc::new(ScreenBuffer::new(initial_size.rows, initial_size.cols));
     let stop = Arc::new(AtomicBool::new(false));
     let detector = Arc::new(std::sync::Mutex::new(IdleDetector::new(1, Instant::now())));
     let (idle_tx, idle_rx) = crossbeam_channel::unbounded::<IdleEvent>();
@@ -63,7 +66,7 @@ pub fn run(cwd: &std::path::Path, args: StartArgs) -> Result<i32> {
     let pty_fwd = if !args.nopty {
         Some(spawn_pty_and_forwarders(
             &args.command, args.mouse, nudge_rx.clone(),
-            &screen, &detector,
+            &screen, &detector, &stop, initial_size,
         )?)
     } else {
         None
@@ -184,11 +187,15 @@ fn trace_exit(msg: &str) {
 /// would hang the wrapper on exit. They're detached; the OS reaps them when
 /// the process exits.
 struct PtyForward {
-    _pair: portable_pty::PtyPair,
+    _slave: Box<dyn portable_pty::SlavePty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     _bridge: thread::JoinHandle<()>,
     _input_h: thread::JoinHandle<anyhow::Result<()>>,
     _output_h: thread::JoinHandle<anyhow::Result<()>>,
+    // Owns the PTY master after take_writer/try_clone_reader have been
+    // called. The watcher must outlive the child: dropping the master closes
+    // ConPTY's conhost, which would kill the child mid-run.
+    _resize_h: thread::JoinHandle<()>,
 }
 
 impl PtyForward {
@@ -204,13 +211,18 @@ fn spawn_pty_and_forwarders(
     nudge_rx: crossbeam_channel::Receiver<Vec<u8>>,
     screen: &Arc<ScreenBuffer>,
     detector: &Arc<std::sync::Mutex<IdleDetector>>,
+    stop: &Arc<AtomicBool>,
+    initial_size: portable_pty::PtySize,
 ) -> Result<PtyForward> {
     use crate::clicom_engine::forwarding::{spawn_input_forwarder, spawn_output_forwarder, AgentBytes};
-    use crate::clicom_engine::pty::{spawn as pty_spawn, current_terminal_size};
+    use crate::clicom_engine::pty::spawn as pty_spawn;
     let strip_mouse = !mouse_allow;
-    let pty = pty_spawn(command.to_vec(), current_terminal_size())?;
+    let pty = pty_spawn(command.to_vec(), initial_size)?;
+    // Take writer/reader before splitting the pair — both are &self methods,
+    // they don't consume master.
     let writer = pty.pair.master.take_writer()?;
     let reader = pty.pair.master.try_clone_reader()?;
+    let portable_pty::PtyPair { master, slave } = pty.pair;
     let (tap_tx, tap_rx) = crossbeam_channel::unbounded::<AgentBytes>();
     let in_h = spawn_input_forwarder(writer, nudge_rx);
     let out_h = spawn_output_forwarder(reader, tap_tx, strip_mouse);
@@ -231,13 +243,81 @@ fn spawn_pty_and_forwarders(
         }
     });
 
+    let resize_h = spawn_resize_watcher(master, Arc::clone(screen), Arc::clone(stop), initial_size);
+
     Ok(PtyForward {
-        _pair: pty.pair,
+        _slave: slave,
         child: pty.child,
         _bridge: bridge,
         _input_h: in_h,
         _output_h: out_h,
+        _resize_h: resize_h,
     })
+}
+
+/// Watch the host console for size changes and propagate them to the wrapped
+/// child PTY (`master.resize`) and our internal vt100 grid (`screen.resize`).
+/// `master` is owned by the watcher: dropping it before the child exits closes
+/// the PTY, so this thread keeps it alive until `stop` is set (or, on Unix,
+/// the process exits and the OS reaps the signal-blocked thread).
+///
+/// We only call `master.resize()` when the host dims actually changed —
+/// blasting an unchanged size at every tick would WINCH the child for nothing.
+fn spawn_resize_watcher(
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    screen: Arc<ScreenBuffer>,
+    stop: Arc<AtomicBool>,
+    initial_size: portable_pty::PtySize,
+) -> thread::JoinHandle<()> {
+    thread::Builder::new()
+        .name("resize_watch".into())
+        .spawn(move || resize_watch_loop(master, screen, stop, initial_size))
+        .expect("spawn resize_watch")
+}
+
+#[cfg(unix)]
+fn resize_watch_loop(
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    screen: Arc<ScreenBuffer>,
+    _stop: Arc<AtomicBool>,
+    initial_size: portable_pty::PtySize,
+) {
+    use crate::clicom_engine::pty::current_terminal_size;
+    use signal_hook::consts::SIGWINCH;
+    use signal_hook::iterator::Signals;
+    let mut signals = match Signals::new([SIGWINCH]) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut last = initial_size;
+    for _ in signals.forever() {
+        let now = current_terminal_size();
+        if now.rows != last.rows || now.cols != last.cols {
+            screen.resize(now.rows, now.cols);
+            let _ = master.resize(now);
+            last = now;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn resize_watch_loop(
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    screen: Arc<ScreenBuffer>,
+    stop: Arc<AtomicBool>,
+    initial_size: portable_pty::PtySize,
+) {
+    use crate::clicom_engine::pty::current_terminal_size;
+    let mut last = initial_size;
+    while !stop.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_secs(2));
+        let now = current_terminal_size();
+        if now.rows != last.rows || now.cols != last.cols {
+            screen.resize(now.rows, now.cols);
+            let _ = master.resize(now);
+            last = now;
+        }
+    }
 }
 
 fn spawn_and_forward_nopty(

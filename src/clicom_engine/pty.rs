@@ -49,4 +49,11 @@ fn term_size_from_console() -> Option<(u16, u16)> {
 }
 
 #[cfg(not(windows))]
-fn term_size_from_console() -> Option<(u16, u16)> { None }
+fn term_size_from_console() -> Option<(u16, u16)> {
+    use std::os::unix::io::AsRawFd;
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let fd = std::io::stdout().as_raw_fd();
+    let ret = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws as *mut _) };
+    if ret != 0 || ws.ws_col == 0 || ws.ws_row == 0 { return None; }
+    Some((ws.ws_col, ws.ws_row))
+}
