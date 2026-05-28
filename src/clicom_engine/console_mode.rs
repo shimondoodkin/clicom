@@ -6,6 +6,12 @@
 //! must interpret VT escapes emitted by ConPTY so cursor positioning, clears,
 //! and alt-screen toggles land correctly.
 //!
+//! On Unix, stdin also defaults to canonical (line-buffered) mode with echo
+//! on — meaning arrow keys get echoed by the kernel as `^[[C`/`^[[D` and
+//! bytes only reach the child after the user hits Enter. The Unix impl puts
+//! the tty into per-character no-echo mode with signal generation disabled,
+//! so keystrokes flow straight through to the wrapped agent.
+//!
 //! `enter_raw()` reads and saves the original modes, sets the wrapper modes,
 //! and returns a guard. The guard's Drop restores the originals — so panics,
 //! early returns, or normal exit all leave the user's terminal as we found it.
@@ -87,7 +93,64 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+mod imp {
+    // Unix mirror of the Windows configure_stdin path: drop the tty out of
+    // canonical/echo mode so arrow keys and other escape sequences flow
+    // through the input forwarder as raw bytes rather than being line-buffered
+    // and echoed locally as `^[[C` / `^[[D`. ISIG/IXON are also cleared so
+    // Ctrl-C / Ctrl-S pass through to the wrapped child (matches Windows,
+    // which clears ENABLE_PROCESSED_INPUT). c_oflag is intentionally left
+    // alone so normal stdout newline handling still works.
+
+    pub struct ConsoleModeGuard {
+        original: Option<libc::termios>,
+    }
+
+    pub fn enter_raw() -> anyhow::Result<ConsoleModeGuard> {
+        unsafe {
+            if libc::isatty(libc::STDIN_FILENO) == 0 {
+                return Ok(ConsoleModeGuard { original: None });
+            }
+            let mut original: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut original) != 0 {
+                return Ok(ConsoleModeGuard { original: None });
+            }
+            let mut raw = original;
+            raw.c_lflag &= !(libc::ICANON
+                | libc::ECHO
+                | libc::ECHONL
+                | libc::ISIG
+                | libc::IEXTEN);
+            raw.c_iflag &= !(libc::IGNBRK
+                | libc::BRKINT
+                | libc::PARMRK
+                | libc::ISTRIP
+                | libc::INLCR
+                | libc::IGNCR
+                | libc::ICRNL
+                | libc::IXON);
+            raw.c_cc[libc::VMIN] = 1;
+            raw.c_cc[libc::VTIME] = 0;
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
+                return Ok(ConsoleModeGuard { original: None });
+            }
+            Ok(ConsoleModeGuard { original: Some(original) })
+        }
+    }
+
+    impl Drop for ConsoleModeGuard {
+        fn drop(&mut self) {
+            if let Some(orig) = self.original.take() {
+                unsafe {
+                    let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &orig);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 mod imp {
     pub struct ConsoleModeGuard;
     pub fn enter_raw() -> anyhow::Result<ConsoleModeGuard> {
