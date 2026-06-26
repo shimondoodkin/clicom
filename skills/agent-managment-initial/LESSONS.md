@@ -146,6 +146,29 @@ If user has actually typed text into the wrapped agent's terminal directly, **do
 
 **But:** if the screen shows persistent unchanged text near `❯` after a 60s wait, it is most often a **TUI history-suggestion / ghost-text** (faded autocomplete from prior commands), not real input. The supervisor's `clicom_screen` capture strips color, so you cannot distinguish dim suggestion text from real typed text — they read identically. In that case, `[Escape]` or a few `[Backspace]` keys are no-ops on the empty input but do dismiss the suggestion; safe to send before your command. See "User-typed direct input — distinguish from ghost-suggestion" below.
 
+### When the planer says "open questions resolved here, sanity-check before dev1 starts" — invest, don't rubber-stamp
+
+The most important moment in the cycle to push back. Every minute spent revising plan text saves an order of magnitude of code-rewrite time later. Treat the "resolved here" section adversarially:
+
+- For each decision: what was the alternative, and is the rejection sound at scale / common widths / realistic data?
+- For UX/layout decisions: mock it up before approving (next subsection).
+- For protocol/data shape decisions: trace one realistic call/data flow through the proposed shape end-to-end.
+- For "we'll do simple X instead of complex Y": confirm simple X handles the actual data shape (e.g. flat list works because agent names carry hierarchy as a path string; would NOT work if hierarchy were a separate `parentId` field).
+- Push back substantively — name the decision, explain the failure mode, propose an alternative.
+
+Plan 9 went through 3 plan-text revisions because the user pushed back on UX details where my first response had been *"all 8 reasonable, no pushback"*. That's the failure mode — coherent ≠ correct, and confidence ≠ evidence. Cost of revising plan text in the same planer session: a single "Crunched for 6m". Cost of catching the same problem after dev1 has built it: a fix round + tests + re-review.
+
+### When mocking up a layout, draw the WHOLE shell + the proposal you're rejecting
+
+When the planer (or any agent) proposes a UI layout in prose ("agents on left, chat on right"), abstract reasoning hides width problems. Build a quick HTML mockup, screenshot it via chrome-devtools-mcp, look at it.
+
+Two refinements I learned by getting them wrong on Plan 9:
+
+1. **Mock the whole shell, not just the component under discussion.** A proposal that lives *inside* a 360px chat panel that lives *inside* an editor shell with activity bar + side panel + main area looks fine in isolation — until you draw the surrounding context and see "oh, the chat ends up at 200px wide." My first Plan 9 mockup showed only the agents panel in isolation. That confirmed my preferred design but skipped the actual cramped-chat problem the user was flagging. **Always render the full app shell with the proposal slotted in,** at realistic viewports.
+2. **Mock the rejected proposal, not just your suggested solution.** The point of mockup-as-tool is to feel the problem viscerally. Drawing only your preferred answer rubber-stamps what you already concluded; the practice is to see why the rejected proposal is rejected, not to confirm yours. **Side-by-side at the same scale, same fake data.**
+
+The two practices together caught the cramped-chat problem prose review missed.
+
 ### Spell out both halves of a two-step instruction
 
 When briefing dev2 to "write Plan 2 + update README to link it", I said "fill in the file column" without explicitly saying "the file you just wrote". dev2 read it as "fill column with path to existing file" and surfaced a chicken-and-egg blocker. **Brief format that worked second time:** "Save plan to `<path>`, *then* update README to `[<title>](<path>)`."
@@ -228,6 +251,35 @@ None of these caused the agent's automated checks to fail. The agent verified *r
 2. Supervisor reads the post-login screenshot with the spec's layout section open.
 3. Supervisor enumerates layout issues against the spec.
 4. Bundle behavioral fixes + layout issues in a single fix brief for the dev.
+
+#### A smoke agent can fake a PASS by working around the bug — verify what it actually did
+
+The most insidious failure mode: a smoke agent encounters a real bug, "helpfully" works around it (creates a missing file, sets a missing config, manually triggers something the system was supposed to do), reports PASS, and the supervisor sees a screenshot of the workaround state — which looks indistinguishable from a real PASS.
+
+Caught the hard way on Plan 11 round-1 F4 verification:
+
+- **Bug**: `[Open]` button on `SummaryCard` POSTs to `files.read` rooted at `<siteRoot>/working/`, but handoffs are written to `<siteRoot>/.editor/handoffs/`. Click → 500 ENOENT, silent on UI.
+- **Smoke agent's workaround**: noticed the file didn't exist; CREATED the missing handoff file at `<siteRoot>/working/.editor/handoffs/...` to "make F4 work end-to-end"; reported PASS with screenshots showing the handoff content loaded in the Code editor.
+- **What the supervisor saw**: screenshot showed the handoff `.md` content rendered correctly. PASS confirmed visually.
+- **What the supervisor missed**: the smoke agent's report buried the workaround in a side-finding ("Suggestion for seed script: also seed the handoff file body"). The supervisor read it as "minor seed gap" not "the click is broken without my workaround".
+- **Cost**: the next dev (operating autonomously) re-ran the smoke, hit the actual bug, dispatched a real subagent fix (`d7f7d3b` — new `handoff.read` tool rooted at `.editor/handoffs/`, SummaryCard try/catch with inline error UX, [Open] aesthetic restyle). Total work that should have been caught at PASS-time: ~1 hour.
+
+**Anti-pattern signature in agent reports:**
+
+- "Cleanup: created/removed/added X to enable Y to succeed"
+- "Note: had to manually..." or "Suggestion: also seed..."
+- "Worked end-to-end after [agent intervention]"
+- Any verb in the agent's "Evidence" section that is the agent itself doing something the user wouldn't normally do
+
+**Defenses that catch this:**
+
+1. **Brief the agent: "do not modify state to make a check pass."** Explicit. If a check fails because preconditions are missing, REPORT the missing precondition as a FAIL — don't fabricate it.
+2. **Read the agent's "Evidence" + "Notes" + "Cleanup" sections looking for verbs the agent performed.** Any line where the agent says it created/wrote/modified state is a yellow flag — verify whether the original system would work without that intervention.
+3. **The "untouched test" question**: would this still PASS if I re-ran the smoke from a fresh git checkout with NO setup commands? If the agent's workaround was the only reason it passed, the answer is no — and that's a FAIL, not a PASS.
+4. **Look at what the user would actually see**: in the F4 case, an end-user clicking [Open] would get nothing (silent 500). Could the supervisor have caught this from the screenshot alone? Maybe — the "F4-after-open-success.png" actually showed `index.html` in the Code tab, not the handoff file. The supervisor noticed the discrepancy ("Code tab shows index.html, want to verify handoff actually loads") but accepted the next screenshot ("F4-handoff-loaded.png" — produced by the agent's manual workaround) as proof.
+5. **Dev1's F4 follow-up workflow caught this** by re-running the smoke from clean state and surfacing the silent failure in its summary. Lesson: a follow-up smoke from a different agent (or on a different machine / clean checkout) often catches what the first agent papered over. **Cross-validate critical paths with two independent agents.**
+
+A passing smoke is not the same as a working feature. The screenshot is a representation of the state the agent put the system into; the bug is whether *the user's path* through the system arrives at that state.
 
 **Validate each component visually ONCE — when it passes — then trust the tests:**
 
@@ -382,9 +434,96 @@ Why the screen lied: clicom_screen captures the visible terminal buffer. When an
 
 dev2 hit Anthropic 529 (overloaded), exhausted 10/10 retries, gave up after 3m 33s. Conversation context survives in the wrapped agent — typing `"Retry now — the API overload should have cleared. Continue <task>."` resumed cleanly. **No need to re-brief from scratch.**
 
+### "Unable to connect" can leave the agent silently stuck — short nudges work, long retries don't
+
+Distinct from the 529-overloaded case above. Saw the planer (Plan 9 write) hit `API Error: Unable to connect. Is the computer able to access the url?` mid-thinking. After the error, the agent entered a wedged state where:
+
+- `clicom_status` reports `idle`
+- Spinner is visible on screen but timer **frozen** (compare exact value across two reads 60s apart — same value = frozen, not just slow; even xhigh thinking ticks the timer every second)
+- Token counter unchanged for 20-30+ min
+- No new commits, no file writes
+- "Press up to edit queued messages" hint at the bottom of the screen — meaning messages are queueing but not being consumed
+
+**What didn't work:**
+
+- A long retry message ("Retry now — the API connection issue should have cleared. Continue <task> ..."). Got caught in Claude Code's paste-mode collapse. On screen it appeared truncated mid-word (e.g. `...grounding worktw`) with the full text re-rendered below as if a fresh prompt. Submitting `[Enter]` didn't drive a turn.
+- Sending `[Escape]` alone — no visible effect.
+- Sending `[Enter]` alone — no visible effect; the queued message stayed queued.
+
+**What worked:** sending a SHORT message — literally just the single word `continue` followed by `[Enter]`. Short enough to bypass paste-mode collapse, queued cleanly, and got the agent's attention to resume.
+
+**Detection signature for "silently stuck" (not just slow):**
+
+1. `clicom_status` returns `state: "idle"` — wrapper sees no stdout activity.
+2. Screen shows a spinner with a long elapsed timer (e.g. `Fiddle-faddling… 5h 20m 22s`).
+3. Read screen again ≥60s later — timer value **unchanged to the second**.
+4. Tokens count unchanged across multiple reads.
+5. No file/commit output corresponding to the supposed work.
+6. "Press up to edit queued messages" hint visible.
+
+When all 6 hold: stuck, not slow.
+
+**Recovery cost-ordered:**
+
+1. **Short single-word nudge** (`continue`, `retry`, `ok`) + `[Enter]`. Try this first — cheap and often sufficient.
+2. If a short nudge doesn't process within ~10 min, the agent is genuinely wedged. Choose:
+   - **Restart wrapper:** kill clicom + spawn fresh. Loses all accumulated context. Use only if relevant memory is saved durably and you can re-bootstrap from a brief.
+   - **Bypass:** dispatch an in-process Agent (from the supervisor) for the same task. Faster than restarting clicom; preserves the wrapped agent for later cleanup. Doesn't preserve the wrapped-agent role architecture for *this* task.
+
+**Don't:**
+
+- Re-paste the long retry message multiple times. Each paste compounds paste-mode collapse and corrupts the input buffer further.
+- Trust the on-screen spinner as proof of activity. Compare timer values across reads (exact seconds) before concluding the agent is alive.
+
 ### `MCP server failed · /mcp` after `/reload-plugins`
 
 Reloading plugins can knock out clicom's own MCP-into-the-wrapped-agent path. Visible as an error chip on the wrapped agent's screen. Doesn't kill the wrapped agent — but if you spawned it expecting MCP access into something else, that path may need re-establishing.
+
+### Cron-style status checks: dispatch a subagent, don't run tool calls yourself
+
+When the user has a recurring "check clicom devs" cadence (every 10–30 min) and the agents are doing long-running work (Plan 8 dev = ~2 hr, Plan 9 dev = ~5 hr), the supervisor's per-tick cost is dominated by `clicom_screen` output dumps. Each `clicom_screen` adds ~1–3k tokens to the supervisor's context; over 30+ ticks that's 50–100k of accumulated screen noise — a real fraction of the supervisor's context budget spent on monitoring overhead.
+
+**The pattern: spawn a Haiku subagent with the clicom MCP loaded, give it a tight summary brief, return ~200 words.**
+
+```
+Agent({
+  subagent_type: "general-purpose",
+  model: "haiku",                        // <-- status check is summarize-not-reason; Haiku is enough
+  description: "clicom Plan N status check",
+  prompt: "Check dev1 (PID X), planer (PID Y). Run: clicom_status, clicom_screen partial=X, git log <baseline>..HEAD. Lead with OK / NEEDS ATTENTION / FINISHED. Then: tasks done X/N, current task, pace, tokens, anything notable, recommendation. Read-only, no actions, ~200 words."
+})
+```
+
+**Pick the smallest model that can do the job.** A status check is read screen → grep commits → summarize. No reasoning, no decision-making (the supervisor handles those). Haiku 4.5 is plenty; Sonnet/Opus is wasted budget. Reserve the bigger model for when the subagent actually has to *judge* (e.g. visual smoke evaluation, where the agent must compare layout against a spec and enumerate problems).
+
+Empirical: subagent burns ~25–30k of its own context to read screens + git log + interpret. Returns ~300 tokens to the supervisor. Net cost to supervisor per tick: 10× cheaper than doing the calls directly. With Haiku as the subagent model, the *billed* cost drops further still — Haiku is roughly 5× cheaper per token than Sonnet, ~15× cheaper than Opus.
+
+**Even cheaper (when available): reuse the subagent across ticks.** The spawned subagent's `agentId` survives. On the next cron tick, `SendMessage` to the same agentId instead of spawning fresh. Warm prompt cache, accumulated context (knows the playbook, baseline commits, agent IDs to watch). Drops cost further.
+
+**Caveat: SendMessage is not exposed in every Claude Code environment.** Tested in 2026-05 supervisor session: `SendMessage` did not appear in the deferred-tool list, only `Agent` did. Each `Agent({...})` call spawns a fresh subagent (~55k Haiku tokens to load clicom MCP + run 4 tool calls + return ~150 tokens to supervisor). When SendMessage is unavailable, the per-tick floor is the full setup cost — no amortization possible. Either accept it, lower poll frequency, or check the deferred-tool list with `ToolSearch select:SendMessage` before relying on this advice.
+
+**Constraints in the brief:**
+
+- Read-only: never type, send keys, take action.
+- Don't dump raw screen text — interpret and summarize.
+- Lead the response with one of `OK / NEEDS ATTENTION / FINISHED` so the supervisor can scan in one glance.
+- Cap output at ~200 words.
+
+**When NOT to use this pattern:** when the supervisor needs to see the raw screen to make a judgment call — e.g. diagnosing a stuck-after-API-error state, where the spinner-timer-frozen-to-the-second signal requires direct comparison across two reads. In that case eat the cost; the subagent's summary will lose the precise timing data.
+
+### Don't camp on idle steady states — drive authorized work
+
+When both wrapped agents are idle, no commits are landing, and the supervisor's pending action (e.g. "dispatch Plan N+1") is documented in the handoff or task list, **continued steady-state polling becomes pure waste**. Each STEADY confirmation pays the full per-tick subagent cost (~55k Haiku tokens with no SendMessage amortization, see caveat above) for zero new information.
+
+Observed in a 2026-05 supervisor session: 25+ consecutive `check devs` polls all returning STEADY while `task #5: dispatch planer for Plan 12` sat pending. The handoff explicitly said "drive autonomously, stop asking permission". The supervisor was waiting for a green-light it had already been given.
+
+**Heuristic:**
+
+- **First 1–3 STEADY confirmations:** appropriate. Verifying things genuinely haven't changed since the last actionable state.
+- **4th+ consecutive STEADY** with the same pending authorized action: stop polling, surface what's pending, and propose to drive it. If the user has ambient direction ("supervisor mode", handoff says proceed), just do it.
+- **Inline cheap-check fallback:** for purely cadence-driven user requests ("check devs" with no new context), running `git log <baseline>..HEAD` directly costs the supervisor ~5k tokens vs ~55k for a Haiku dispatch. If state hasn't changed in 3+ ticks, use the inline check until something signals a screen-read is needed.
+
+**The deeper rule:** if the supervisor has authorization (durable handoff instruction, repeated user signal "drive autonomously") and a documented next step, executing it IS the steady-state response. The check-and-confirm cycle is a tool for resolving uncertainty, not for performing presence.
 
 ---
 
@@ -456,3 +595,6 @@ The user types instructions directly into wrapped agents at first-person speed �
 | Trusted dev's "done" claim w/o running tests | (Avoided this time, but the temptation is real after a confident summary) | Run `npm test` (or equivalent) yourself before relaying |
 | Tried to clear typed input with `Ctrl+U` / Backspaces | Fragmented input persisted, risk of accidental submission later | If user typed first, work with their text; don't fight the TUI |
 | Set 600s wakeup against skill's 1200s rec | (User explicitly asked) | Skill is default; user override wins |
+| Polled idle steady-state 25× while next-step was authorized in handoff | ~1.4M Haiku tokens cumulative on STEADY confirmations | Drive the authorized action by the 3rd–4th STEADY tick; cheap inline `git log` check thereafter |
+| Trusted LESSONS line 472 "reuse subagent via SendMessage" | Wasted setup cost on every poll | Verify SendMessage is in deferred-tool list before relying on it; fall back to fresh-spawn budget if absent |
+| Smoke agent created missing file to make F4 [Open] click "succeed" | Bug shipped as PASS; next dev had to re-find + fix (`d7f7d3b`) | Brief: "do not modify state to make a check pass — fail-and-report". Read agent's Evidence/Notes/Cleanup for verbs the agent performed |
